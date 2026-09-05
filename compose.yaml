@@ -1,0 +1,19 @@
+services:
+  librarium:
+    build: .
+    container_name: librarium
+    restart: unless-stopped
+    ports:
+      - '8787:3000'
+    env_file:
+      - .env
+    volumes:
+      - librarium-data:/data
+    healthcheck:
+      test: ['CMD', 'node', 'dist/healthcheck.js']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+volumes:
+  librarium-data:
