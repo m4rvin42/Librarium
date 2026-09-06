@@ -18,6 +18,7 @@ COPY --from=build --chown=librarium:librarium /app/packages/shared/package.json 
 COPY --from=build --chown=librarium:librarium /app/packages/shared/dist ./packages/shared/dist
 COPY --from=build --chown=librarium:librarium /app/apps/api/dist ./dist
 COPY --from=build --chown=librarium:librarium /app/apps/api/src/schema.sql ./dist/schema.sql
+COPY --from=build --chown=librarium:librarium /app/apps/api/migrations ./dist/migrations
 COPY --from=build --chown=librarium:librarium /app/dist/public ./dist/public
 COPY --from=build --chown=librarium:librarium /app/package.json ./package.json
 USER librarium

@@ -9,7 +9,7 @@ Screenshot placeholder: dashboard and mobile import-review screenshots will acco
 - React, React Router, and React Query compile to static assets served by Fastify.
 - Fastify exposes /api/v1, OpenAPI at /api/docs, cookie sessions, and bearer-token access.
 - SQLite uses WAL and foreign keys. Authors/categories are normalized; sessions and image candidates are separate records.
-- Open Library is behind a provider-neutral module with timeouts, retries, restrained requests, and caching.
+- ISBN metadata uses configurable Open Library and Google Books providers with timeouts, retries, fallback, and caching.
 - Sharp normalizes images and ZXing checks barcodes before optional server-side OpenAI analysis. Candidates always require approval.
 
 See [architecture details](docs/architecture.md).
@@ -18,7 +18,7 @@ See [architecture details](docs/architecture.md).
 
 1. Copy .env.example to .env.
 2. Set a strong ADMIN_PASSWORD and, for API use, a random API_TOKEN.
-3. Optionally set OPENLIBRARY_CONTACT_EMAIL. Image recognition also needs OPENAI_API_KEY and OPENAI_VISION_MODEL.
+3. Optionally set OPENLIBRARY_CONTACT_EMAIL and GOOGLE_BOOKS_API_KEY. Set SETTINGS_ENCRYPTION_KEY to manage the Google key in Settings. Image recognition also needs OPENAI_API_KEY and OPENAI_VISION_MODEL.
 4. Run: docker compose up -d --build
 5. Open http://localhost:8787 and sign in as ADMIN_USERNAME (default admin).
 
@@ -42,12 +42,15 @@ Verify with npm run lint, npm run typecheck, npm test, and npm run build.
 | COOKIE_SECURE                   | Set true when served through HTTPS           |
 | OPENAI_API_KEY                  | Server-only key                              |
 | OPENAI_VISION_MODEL             | Vision-capable Responses API model           |
+| OPENAI_METADATA_MODEL           | Web-search ISBN fallback model; defaults to vision model |
 | OPENAI_IMAGE_ANALYSIS_ENABLED   | Feature switch                               |
-| METADATA_PROVIDER               | Currently openlibrary                        |
+| METADATA_PROVIDERS              | Comma-separated order, e.g. openlibrary,googlebooks |
 | OPENLIBRARY_CONTACT_EMAIL       | Identifies metadata requests                 |
+| GOOGLE_BOOKS_API_KEY            | Google Books API key; recommended for quota  |
+| SETTINGS_ENCRYPTION_KEY         | Base64-encoded 32-byte key for encrypted UI credentials |
 | MAX_IMAGE_SIZE_MB               | Per-image upload limit                       |
 
-Without OpenAI credentials, manual and ISBN workflows remain usable.
+Without OpenAI credentials, manual and ISBN workflows remain usable. Selecting OpenAI web search as a metadata provider sends the ISBN query to OpenAI and its search service.
 
 ## Workflows
 
@@ -67,8 +70,9 @@ Settings downloads versioned JSON or a consistent SQLite snapshot. JSON import v
 Before updating, download a backup, then run git pull and docker compose up -d --build. Migrations run at startup.
 
 - Login 503 means ADMIN_PASSWORD is empty.
-- Unknown ISBNs may be absent from Open Library; add them manually.
-- Configure OPENLIBRARY_CONTACT_EMAIL if metadata is throttled.
+- Unknown ISBNs may be absent from both configured providers; add them manually.
+- Configure OPENLIBRARY_CONTACT_EMAIL if Open Library is throttled. Google Books is used as the next configured fallback.
+- Provider order can be changed in Settings. Keys saved there are encrypted with SETTINGS_ENCRYPTION_KEY and never displayed; clearing the saved key falls back to GOOGLE_BOOKS_API_KEY.
 - For health failures run docker compose exec librarium node dist/healthcheck.js and check volume permissions.
 
 Image analysis sends normalized images to OpenAI and may expose faces, rooms, labels, or other private details. Crop first and review OpenAI data-control terms. Barcode-only images do not call OpenAI. Credentials, cookies, and image bodies are redacted from logs.

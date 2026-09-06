@@ -28,6 +28,7 @@ import {
   updateBook,
 } from './repository.js';
 import { lookupIsbn, searchMetadata } from './metadata.js';
+import { metadataSettingsStatus, saveMetadataSettings } from './metadata-settings.js';
 import { analyzeImage, detectBarcode, normalizeImage } from './images.js';
 
 const hash = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
@@ -40,7 +41,13 @@ const error = (code: string, message: string, details?: unknown) => ({
 export async function buildApp() {
   const app = Fastify({
     logger: {
-      redact: ['req.headers.authorization', 'req.headers.cookie', 'body.password', 'body.image'],
+      redact: [
+        'req.headers.authorization',
+        'req.headers.cookie',
+        'body.password',
+        'body.image',
+        'body.googleBooksApiKey',
+      ],
     },
   });
   await app.register(cookie);
@@ -57,7 +64,8 @@ export async function buildApp() {
   });
   await app.register(swaggerUi, { routePrefix: '/api/docs' });
 
-  app.setErrorHandler((cause: Error & { statusCode?: number; code?: string }, request, reply) => {
+  app.setErrorHandler(
+    (cause: Error & { statusCode?: number; code?: string; details?: unknown }, request, reply) => {
     request.log.warn({ err: cause }, 'Request failed');
     const batchId = (request as any).importBatchId;
     if (batchId)
@@ -69,8 +77,11 @@ export async function buildApp() {
     const isConstraint =
       typeof cause.code === 'string' && cause.code.startsWith('SQLITE_CONSTRAINT');
     const status = cause.statusCode || (isConstraint ? 409 : 400);
-    reply.code(status).send(error(status === 409 ? 'CONFLICT' : 'BAD_REQUEST', cause.message));
-  });
+    const code =
+      status === 409 ? 'CONFLICT' : cause.code === 'METADATA_PROVIDER_UNAVAILABLE' || cause.code === 'SETTINGS_ENCRYPTION_UNAVAILABLE' ? cause.code : 'BAD_REQUEST';
+      reply.code(status).send(error(code, cause.message, cause.details));
+    },
+  );
 
   app.get('/api/v1/health', async () => ({
     status: 'ok',
@@ -622,7 +633,7 @@ export async function buildApp() {
       const version = source
         .prepare('SELECT max(version) version FROM schema_migrations')
         .get() as any;
-      if (version?.version !== 1) throw new Error('Unsupported Librarium database schema');
+      if (![1, 2].includes(version?.version)) throw new Error('Unsupported Librarium database schema');
       source.prepare('PRAGMA integrity_check').get();
     } finally {
       source.close();
@@ -643,8 +654,7 @@ export async function buildApp() {
     return { restored: true, backup: path.basename(backup) };
   });
   app.get('/api/v1/settings/status', async () => ({
-    metadataProvider: 'openlibrary',
-    metadataConfigured: Boolean(config.contact),
+    metadata: metadataSettingsStatus(),
     imageAnalysis: {
       enabled: config.visionEnabled && Boolean(config.openAiKey),
       model: config.visionModel,
@@ -652,6 +662,9 @@ export async function buildApp() {
     },
     maxImageSizeMb: config.maxImageMb,
   }));
+  app.put('/api/v1/settings/metadata', async (req) =>
+    saveMetadataSettings(req.body),
+  );
 
   const publicDir = path.resolve('dist/public');
   if (fs.existsSync(publicDir)) {

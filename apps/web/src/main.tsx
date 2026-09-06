@@ -779,6 +779,11 @@ function Review() {
 function Settings() {
   const query = useQuery({ queryKey: ['settings'], queryFn: () => api<any>('/settings/status') });
   const [message, setMessage] = useState('');
+  const metadataSettings = useMutation({
+    mutationFn: (payload: unknown) =>
+      api<any>('/settings/metadata', { method: 'PUT', body: JSON.stringify(payload) }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['settings'] }),
+  });
   async function jsonImport(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget),
@@ -796,6 +801,28 @@ function Settings() {
       setMessage((error as Error).message);
     }
   }
+  async function saveMetadata(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const primary = String(form.get('primaryProvider'));
+    const fallback = String(form.get('fallbackProvider'));
+    const finalFallback = String(form.get('finalFallbackProvider'));
+    const providers = [...new Set([primary, fallback, finalFallback].filter(Boolean))];
+    const googleBooksApiKey = String(form.get('googleBooksApiKey') || '').trim();
+    try {
+      await metadataSettings.mutateAsync({
+        providers,
+        ...(googleBooksApiKey ? { googleBooksApiKey } : {}),
+        clearGoogleBooksApiKey: form.get('clearGoogleBooksApiKey') === 'on',
+      });
+      setMessage('Metadata settings saved.');
+      event.currentTarget.reset();
+    } catch (error) {
+      setMessage((error as Error).message);
+    }
+  }
+  const metadata = query.data?.metadata;
+  const providers = metadata?.providers ?? ['openlibrary'];
   return (
     <main>
       <p className="eyebrow">Administration</p>
@@ -805,9 +832,15 @@ function Settings() {
           <h2>Feature status</h2>
           <dl>
             <dt>Metadata</dt>
-            <dd>Open Library</dd>
-            <dt>Provider identity</dt>
-            <dd>{query.data?.metadataConfigured ? 'Configured' : 'Contact email recommended'}</dd>
+            <dd>{providers.join(' → ')}</dd>
+            <dt>Google Books key</dt>
+            <dd>{metadata?.googleBooksKeyConfigured ? 'Configured' : 'Not configured'}</dd>
+            <dt>OpenAI web search</dt>
+            <dd>
+              {metadata?.openAiWebSearchConfigured
+                ? `Configured (${metadata.openAiMetadataModel})`
+                : 'OpenAI API key not configured'}
+            </dd>
             <dt>Image analysis</dt>
             <dd>
               {query.data?.imageAnalysis.enabled
@@ -816,6 +849,51 @@ function Settings() {
             </dd>
           </dl>
         </section>
+        <form className="panel" onSubmit={saveMetadata} key={providers.join(',')}>
+          <h2>ISBN metadata</h2>
+          <label>
+            Primary provider
+            <select name="primaryProvider" defaultValue={providers[0]}>
+              <option value="openlibrary">Open Library</option>
+              <option value="googlebooks">Google Books</option>
+              <option value="openai-web-search">OpenAI web search</option>
+            </select>
+          </label>
+          <label>
+            Fallback provider
+            <select name="fallbackProvider" defaultValue={providers[1] ?? ''}>
+              <option value="">None</option>
+              <option value="openlibrary">Open Library</option>
+              <option value="googlebooks">Google Books</option>
+              <option value="openai-web-search">OpenAI web search</option>
+            </select>
+          </label>
+          <label>
+            Final fallback provider
+            <select name="finalFallbackProvider" defaultValue={providers[2] ?? ''}>
+              <option value="">None</option>
+              <option value="openlibrary">Open Library</option>
+              <option value="googlebooks">Google Books</option>
+              <option value="openai-web-search">OpenAI web search</option>
+            </select>
+          </label>
+          <label>
+            Google Books API key
+            <input name="googleBooksApiKey" type="password" autoComplete="off" />
+          </label>
+          <label>
+            <input name="clearGoogleBooksApiKey" type="checkbox" /> Clear saved Google Books key
+          </label>
+          {!metadata?.editable && (
+            <p className="muted">Set SETTINGS_ENCRYPTION_KEY to save a Google Books key here.</p>
+          )}
+          <p className="muted">
+            OpenAI web search sends the ISBN to OpenAI and its search service when selected.
+          </p>
+          <button disabled={metadataSettings.isPending}>
+            {metadataSettings.isPending ? 'Saving…' : 'Save metadata settings'}
+          </button>
+        </form>
         <section className="panel">
           <h2>Download backup</h2>
           <p>JSON is portable. SQLite preserves the complete database.</p>
@@ -836,6 +914,7 @@ function Settings() {
           {message && <p>{message}</p>}
         </form>
       </div>
+      {message && <p className="muted">{message}</p>}
       <p className="muted">
         SQLite restore is available through the authenticated API and requires the explicit RESTORE
         confirmation header.

@@ -54,4 +54,32 @@ export const ImageCandidate = z.object({
 });
 export const ImageAnalysis = z.object({ books: z.array(ImageCandidate).max(100) });
 
+export const metadataProviders = ['openlibrary', 'googlebooks', 'openai-web-search'] as const;
+export const MetadataProvider = z.enum(metadataProviders);
+export const MetadataSettingsInput = z.object({
+  providers: z
+    .array(MetadataProvider)
+    .min(1)
+    .max(metadataProviders.length)
+    .refine((providers) => new Set(providers).size === providers.length, 'Providers must be unique'),
+  googleBooksApiKey: z.string().trim().min(1).max(512).optional(),
+  clearGoogleBooksApiKey: z.boolean().optional(),
+});
+
+export const OpenAiMetadataResult = z.object({
+  title: z.string().trim().min(1).max(500).nullable(),
+  subtitle: z.string().max(500).nullable(),
+  authors: z.array(z.string().trim().min(1).max(200)).max(50),
+  publisher: z.string().max(300).nullable(),
+  publicationDate: z.string().max(32).nullable(),
+  language: z.string().max(16).nullable(),
+  pageCount: z.number().int().positive().nullable(),
+  description: z.string().max(50000).nullable(),
+  categories: z.array(z.string().trim().min(1).max(100)).max(20),
+  coverUrl: z.string().url().nullable(),
+  isbn10: z.string().nullable(),
+  isbn13: z.string().nullable(),
+  editionFormat: z.string().max(100).nullable(),
+});
+
 export type ApiError = { error: { code: string; message: string; details?: unknown } };

@@ -94,3 +94,8 @@ export const importCandidates = sqliteTable('import_candidates', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
+export const appSettings = sqliteTable('app_settings', {
+  key: text().primaryKey(),
+  value: text().notNull(),
+  updatedAt: text('updated_at').notNull(),
+});

@@ -1,6 +1,8 @@
-import { parseIsbn } from '@librarium/shared';
+import OpenAI from 'openai';
+import { OpenAiMetadataResult, parseIsbn } from '@librarium/shared';
 import { db, now } from './db.js';
 import { config } from './config.js';
+import { metadataConfiguration } from './metadata-settings.js';
 
 export type MetadataBook = {
   title: string;
@@ -20,9 +22,38 @@ export type MetadataBook = {
   metadataSourceId: string | null;
 };
 
+type MetadataProvider = 'openlibrary' | 'googlebooks' | 'openai-web-search';
+type ProviderAttempt = {
+  provider: MetadataProvider;
+  outcome: 'unavailable' | 'not_found' | 'not_configured';
+};
+
+const providerName: Record<MetadataProvider, string> = {
+  openlibrary: 'Open Library',
+  googlebooks: 'Google Books',
+  'openai-web-search': 'OpenAI web search',
+};
+
+export class MetadataProviderUnavailableError extends Error {
+  statusCode = 503;
+  code = 'METADATA_PROVIDER_UNAVAILABLE';
+  details: { attempts: Array<ProviderAttempt & { name: string }> };
+
+  constructor(attempts: ProviderAttempt[]) {
+    const details = attempts.map((attempt) => ({ ...attempt, name: providerName[attempt.provider] }));
+    super(
+      `Metadata lookup failed after trying: ${details
+        .map(({ name, outcome }) => `${name} (${outcome.replace('_', ' ')})`)
+        .join('; ')}.`,
+    );
+    this.details = { attempts: details };
+  }
+}
+
+class ProviderUnavailableError extends Error {}
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function fetchJson(url: string) {
+async function fetchJson(url: string, provider: MetadataProvider) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8000);
@@ -30,42 +61,42 @@ async function fetchJson(url: string) {
       const response = await fetch(url, {
         signal: controller.signal,
         headers: {
-          'user-agent': `Librarium/1.0 (${config.contact || 'self-hosted'})`,
+          'user-agent': `Librarium/1.0 (${config.openLibraryContact || 'self-hosted'})`,
           accept: 'application/json',
         },
       });
       if (response.ok) return response.json();
       if (response.status === 404) return null;
       if (response.status < 500 && response.status !== 429)
-        throw new Error(`Metadata provider returned ${response.status}`);
+        throw new ProviderUnavailableError(`${provider} returned ${response.status}`);
     } catch (cause) {
-      if (attempt === 2) throw new Error('Metadata provider unavailable after retries', { cause });
+      if (cause instanceof ProviderUnavailableError || attempt === 2)
+        throw new ProviderUnavailableError(`${provider} is unavailable`);
     } finally {
       clearTimeout(timer);
     }
     await delay(350 * (attempt + 1));
   }
-  throw new Error('Metadata provider unavailable after retries');
+  throw new ProviderUnavailableError(`${provider} is unavailable`);
 }
 
-function mapDoc(doc: any, isbn?: string): MetadataBook {
-  let isbn10: string | null = null,
-    isbn13: string | null = null;
-  const candidate = isbn || doc.isbn?.find((x: string) => x.length === 13) || doc.isbn?.[0];
+function mapOpenLibraryDoc(doc: any, isbn?: string): MetadataBook {
+  let isbn10: string | null = null;
+  let isbn13: string | null = null;
+  const candidate = isbn || doc.isbn?.find((value: string) => value.length === 13) || doc.isbn?.[0];
   if (candidate)
     try {
       ({ isbn10, isbn13 } = parseIsbn(candidate));
     } catch {
-      /* ignore invalid provider ISBN */
+      isbn10 = null;
+      isbn13 = null;
     }
   return {
     title: doc.title,
     subtitle: doc.subtitle ?? null,
     authors: doc.author_name ?? [],
     publisher: doc.publisher?.[0] ?? doc.publishers?.[0] ?? null,
-    publicationDate: doc.first_publish_year
-      ? String(doc.first_publish_year)
-      : (doc.publish_date ?? null),
+    publicationDate: doc.first_publish_year ? String(doc.first_publish_year) : (doc.publish_date ?? null),
     language: doc.language?.[0] ?? null,
     pageCount: doc.number_of_pages_median ?? doc.number_of_pages ?? null,
     description:
@@ -84,52 +115,212 @@ function mapDoc(doc: any, isbn?: string): MetadataBook {
   };
 }
 
-export async function lookupIsbn(value: string): Promise<MetadataBook | null> {
-  const parsed = parseIsbn(value),
-    key = `isbn:${parsed.isbn13}`;
-  const cached = db
-    .prepare('SELECT value FROM metadata_cache WHERE cache_key=? AND expires_at>?')
-    .get(key, now()) as any;
-  if (cached) return JSON.parse(cached.value);
-  const data = (await fetchJson(`https://openlibrary.org/isbn/${parsed.isbn13}.json`)) as any;
+function mapGoogleBook(volume: any, isbn: string): MetadataBook | null {
+  const info = volume.volumeInfo ?? {};
+  let isbn10: string | null = null;
+  let isbn13: string | null = null;
+  for (const identifier of info.industryIdentifiers ?? []) {
+    try {
+      const parsed = parseIsbn(identifier.identifier || '');
+      isbn10 ||= parsed.isbn10;
+      isbn13 ||= parsed.isbn13;
+    } catch {
+      continue;
+    }
+  }
+  if (isbn13 !== isbn || !info.title) return null;
+  return {
+    title: info.title,
+    subtitle: info.subtitle ?? null,
+    authors: info.authors ?? [],
+    publisher: info.publisher ?? null,
+    publicationDate: info.publishedDate ?? null,
+    language: info.language ?? null,
+    pageCount: info.pageCount ?? null,
+    description: info.description ?? null,
+    categories: (info.categories ?? []).slice(0, 20),
+    coverUrl: info.imageLinks?.thumbnail?.replace(/^http:/, 'https:') ?? null,
+    isbn10,
+    isbn13,
+    editionFormat: info.printType ?? null,
+    metadataSource: 'googlebooks',
+    metadataSourceId: volume.id ?? null,
+  };
+}
+
+function mapOpenAiBook(value: unknown, isbn: string): MetadataBook | null {
+  const result = OpenAiMetadataResult.safeParse(value);
+  if (!result.success || !result.data.title) return null;
+  const candidate = result.data.isbn13 || result.data.isbn10;
+  if (!candidate) return null;
+  try {
+    const parsed = parseIsbn(candidate);
+    if (parsed.isbn13 !== isbn) return null;
+    return {
+      ...result.data,
+      title: result.data.title,
+      isbn10: parsed.isbn10,
+      isbn13: parsed.isbn13,
+      metadataSource: 'openai-web-search',
+      metadataSourceId: null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function lookupOpenLibrary(isbn: string) {
+  const data = (await fetchJson(`https://openlibrary.org/isbn/${isbn}.json`, 'openlibrary')) as any;
   if (!data) {
     const search = (await fetchJson(
-      `https://openlibrary.org/search.json?isbn=${parsed.isbn13}&limit=5`,
+      `https://openlibrary.org/search.json?isbn=${isbn}&limit=5`,
+      'openlibrary',
     )) as any;
     const exact = (search?.docs ?? []).find((doc: any) =>
       (doc.isbn ?? []).some((candidate: string) => {
         try {
-          return parseIsbn(candidate).isbn13 === parsed.isbn13;
+          return parseIsbn(candidate).isbn13 === isbn;
         } catch {
           return false;
         }
       }),
     );
-    if (!exact) return null;
-    const book = mapDoc(exact, parsed.isbn13);
-    db.prepare(
-      'INSERT OR REPLACE INTO metadata_cache(cache_key,value,expires_at) VALUES(?,?,?)',
-    ).run(key, JSON.stringify(book), new Date(Date.now() + 7 * 86_400_000).toISOString());
-    return book;
+    return exact ? mapOpenLibraryDoc(exact, isbn) : null;
   }
   const authors: string[] = [];
   for (const author of data.authors ?? []) {
-    const a = (await fetchJson(`https://openlibrary.org${author.key}.json`)) as any;
-    if (a?.name) authors.push(a.name);
+    const person = (await fetchJson(`https://openlibrary.org${author.key}.json`, 'openlibrary')) as any;
+    if (person?.name) authors.push(person.name);
     await delay(100);
   }
-  const book = mapDoc({ ...data, author_name: authors }, parsed.isbn13);
+  return mapOpenLibraryDoc({ ...data, author_name: authors }, isbn);
+}
+
+async function lookupGoogleBooks(isbn: string, apiKey: string) {
+  const params = new URLSearchParams({ q: `isbn:${isbn}`, maxResults: '5' });
+  if (apiKey) params.set('key', apiKey);
+  const data = (await fetchJson(
+    `https://www.googleapis.com/books/v1/volumes?${params}`,
+    'googlebooks',
+  )) as any;
+  return (data?.items ?? []).map((volume: any) => mapGoogleBook(volume, isbn)).find(Boolean) ?? null;
+}
+
+async function lookupOpenAiWebSearch(isbn: string) {
+  if (!config.openAiKey) return null;
+  const client = new OpenAI({ apiKey: config.openAiKey });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await client.responses.create({
+        model: config.metadataModel,
+        store: false,
+        tools: [{ type: 'web_search' }],
+        tool_choice: 'required',
+        input: `Use web search to find the exact book edition with ISBN ${isbn}. Return only verified edition metadata. Do not guess; if the exact ISBN cannot be verified, return null title and null ISBN fields.`,
+        text: {
+          format: {
+            type: 'json_schema',
+            name: 'isbn_metadata',
+            strict: true,
+            schema: {
+              type: 'object',
+              additionalProperties: false,
+              required: [
+                'title',
+                'subtitle',
+                'authors',
+                'publisher',
+                'publicationDate',
+                'language',
+                'pageCount',
+                'description',
+                'categories',
+                'coverUrl',
+                'isbn10',
+                'isbn13',
+                'editionFormat',
+              ],
+              properties: {
+                title: { type: ['string', 'null'] },
+                subtitle: { type: ['string', 'null'] },
+                authors: { type: 'array', items: { type: 'string' } },
+                publisher: { type: ['string', 'null'] },
+                publicationDate: { type: ['string', 'null'] },
+                language: { type: ['string', 'null'] },
+                pageCount: { type: ['integer', 'null'] },
+                description: { type: ['string', 'null'] },
+                categories: { type: 'array', items: { type: 'string' } },
+                coverUrl: { type: ['string', 'null'] },
+                isbn10: { type: ['string', 'null'] },
+                isbn13: { type: ['string', 'null'] },
+                editionFormat: { type: ['string', 'null'] },
+              },
+            },
+          },
+        },
+      });
+      try {
+        return mapOpenAiBook(JSON.parse(response.output_text), isbn);
+      } catch {
+        return null;
+      }
+    } catch {
+      if (attempt === 2) throw new ProviderUnavailableError('openai-web-search is unavailable');
+      await delay(350 * (attempt + 1));
+    }
+  }
+  throw new ProviderUnavailableError('openai-web-search is unavailable');
+}
+
+function cacheBook(key: string, book: MetadataBook) {
   db.prepare('INSERT OR REPLACE INTO metadata_cache(cache_key,value,expires_at) VALUES(?,?,?)').run(
     key,
     JSON.stringify(book),
     new Date(Date.now() + 7 * 86_400_000).toISOString(),
   );
-  return book;
+}
+
+export async function lookupIsbn(value: string): Promise<MetadataBook | null> {
+  const parsed = parseIsbn(value);
+  const key = `isbn:${parsed.isbn13}`;
+  const cached = db
+    .prepare('SELECT value FROM metadata_cache WHERE cache_key=? AND expires_at>?')
+    .get(key, now()) as { value: string } | undefined;
+  if (cached) return JSON.parse(cached.value);
+
+  const settings = metadataConfiguration();
+  let providerResponded = false;
+  const attempts: ProviderAttempt[] = [];
+  for (const provider of settings.providers) {
+    if (provider === 'openai-web-search' && !config.openAiKey) {
+      attempts.push({ provider, outcome: 'not_configured' });
+      continue;
+    }
+    try {
+      const book =
+        provider === 'openlibrary'
+          ? await lookupOpenLibrary(parsed.isbn13)
+          : provider === 'googlebooks'
+            ? await lookupGoogleBooks(parsed.isbn13, settings.googleBooksApiKey)
+            : await lookupOpenAiWebSearch(parsed.isbn13);
+      providerResponded = true;
+      if (book) {
+        cacheBook(key, book);
+        return book;
+      }
+      attempts.push({ provider, outcome: 'not_found' });
+    } catch (cause) {
+      if (!(cause instanceof ProviderUnavailableError)) throw cause;
+      attempts.push({ provider, outcome: 'unavailable' });
+    }
+  }
+  if (!providerResponded) throw new MetadataProviderUnavailableError(attempts);
+  return null;
 }
 
 export async function searchMetadata(title: string, author?: string): Promise<MetadataBook[]> {
   const params = new URLSearchParams({ title, limit: '5' });
   if (author) params.set('author', author);
-  const data = (await fetchJson(`https://openlibrary.org/search.json?${params}`)) as any;
-  return (data?.docs ?? []).map((doc: any) => mapDoc(doc));
+  const data = (await fetchJson(`https://openlibrary.org/search.json?${params}`, 'openlibrary')) as any;
+  return (data?.docs ?? []).map((doc: any) => mapOpenLibraryDoc(doc));
 }

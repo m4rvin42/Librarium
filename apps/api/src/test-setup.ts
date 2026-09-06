@@ -4,3 +4,7 @@ process.env.ADMIN_USERNAME = 'admin';
 process.env.ADMIN_PASSWORD = 'test-password';
 process.env.API_TOKEN = 'test-token';
 process.env.OPENAI_IMAGE_ANALYSIS_ENABLED = 'false';
+process.env.OPENAI_API_KEY = 'test-openai-key';
+process.env.OPENAI_METADATA_MODEL = 'test-metadata-model';
+process.env.METADATA_PROVIDERS = 'openlibrary,googlebooks';
+process.env.SETTINGS_ENCRYPTION_KEY = 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=';
