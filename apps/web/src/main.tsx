@@ -1,4 +1,4 @@
-import { FormEvent, useState } from 'react';
+import { FormEvent, PointerEvent as ReactPointerEvent, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   QueryClient,
@@ -62,6 +62,9 @@ type Book = {
     notes?: string;
   }>;
 };
+
+type CoverCorner = { x: number; y: number };
+type CoverDraft = { id: string; corners: CoverCorner[]; previewUrl: string };
 
 function Login() {
   const [username, setUsername] = useState('admin'),
@@ -296,6 +299,61 @@ function Library() {
   );
 }
 
+function CoverCornerEditor({
+  draft,
+  onConfirm,
+  pending,
+}: {
+  draft: CoverDraft;
+  onConfirm: (corners: CoverCorner[]) => void;
+  pending: boolean;
+}) {
+  const [corners, setCorners] = useState(draft.corners);
+  const [activeCorner, setActiveCorner] = useState<number | null>(null);
+  const moveCorner = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (activeCorner === null) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const x = Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width));
+    const y = Math.min(1, Math.max(0, (event.clientY - bounds.top) / bounds.height));
+    setCorners((current) =>
+      current.map((corner, index) => (index === activeCorner ? { x, y } : corner)),
+    );
+  };
+  return (
+    <section className="cover-review">
+      <h4>Adjust cover corners</h4>
+      <p className="muted">Drag each point onto the cover, then confirm the straightened image.</p>
+      <div
+        className="cover-corner-editor"
+        onPointerMove={moveCorner}
+        onPointerUp={() => setActiveCorner(null)}
+        onPointerLeave={() => setActiveCorner(null)}
+      >
+        <img src={draft.previewUrl} alt="Uploaded cover awaiting straightening" />
+        <svg viewBox="0 0 1 1" preserveAspectRatio="none" aria-label="Cover corner editor">
+          <polygon points={corners.map((corner) => `${corner.x},${corner.y}`).join(' ')} />
+          {corners.map((corner, index) => (
+            <circle
+              key={index}
+              cx={corner.x}
+              cy={corner.y}
+              r="0.025"
+              onPointerDown={(event) => {
+                event.preventDefault();
+                event.currentTarget.setPointerCapture(event.pointerId);
+                setActiveCorner(index);
+              }}
+            />
+          ))}
+        </svg>
+      </div>
+      <button onClick={() => onConfirm(corners)} disabled={pending}>
+        {pending ? 'Straightening…' : 'Confirm straightened cover'}
+      </button>
+    </section>
+  );
+}
+
 function BookDetails() {
   const { id } = useParams(),
     navigate = useNavigate(),
@@ -303,6 +361,8 @@ function BookDetails() {
     [editing, setEditing] = useState(false);
   const [proposal, setProposal] = useState<any>(null);
   const [selectedProposalFields, setSelectedProposalFields] = useState<string[]>([]);
+  const [coverDraft, setCoverDraft] = useState<CoverDraft | null>(null);
+  const [usePhotoAsCover, setUsePhotoAsCover] = useState(false);
   const query = useQuery({ queryKey: ['book', id], queryFn: () => api<Book>(`/books/${id}`) });
   const remove = useMutation({
     mutationFn: () => api(`/books/${id}`, { method: 'DELETE' }),
@@ -328,12 +388,24 @@ function BookDetails() {
     mutationFn: (form: FormData) => api<any>(`/books/${id}/enrich`, { method: 'POST', body: form }),
     onSuccess: (result) => {
       setProposal(result.proposal);
+      setCoverDraft(result.coverDraft);
       setSelectedProposalFields(
         enrichmentFields.filter(
-          (field) => result.proposal[field] !== null && result.proposal[field] !== undefined,
+          (field) => result.proposal?.[field] !== null && result.proposal?.[field] !== undefined,
         ),
       );
       if (result.coverUpdated) query.refetch();
+    },
+  });
+  const confirmCover = useMutation({
+    mutationFn: (corners: CoverCorner[]) =>
+      api<any>(`/books/${id}/cover-drafts/${coverDraft?.id}/confirm`, {
+        method: 'POST',
+        body: JSON.stringify({ corners }),
+      }),
+    onSuccess: () => {
+      setCoverDraft(null);
+      query.refetch();
     },
   });
   if (!query.data) return <main>{query.isLoading ? 'Loading…' : 'Book not found'}</main>;
@@ -521,17 +593,42 @@ function BookDetails() {
               }}
             >
               <label>
-                Image
-                <input name="image" type="file" accept="image/*" capture="environment" required />
+                <input
+                  name="useAsCover"
+                  type="checkbox"
+                  value="true"
+                  checked={usePhotoAsCover}
+                  onChange={(event) => setUsePhotoAsCover(event.target.checked)}
+                />{' '}
+                Use this image as the cover
               </label>
               <label>
-                <input name="useAsCover" type="checkbox" value="true" /> Use this image as the cover
+                <input
+                  name="straightenCover"
+                  type="checkbox"
+                  value="true"
+                  onChange={(event) => event.target.checked && setUsePhotoAsCover(true)}
+                />{' '}
+                Automatically straighten cover
+              </label>
+              <label>
+                Image
+                <input name="image" type="file" accept="image/*" capture="environment" required />
               </label>
               <button disabled={enrich.isPending}>
                 {enrich.isPending ? 'Analysing…' : 'Analyse photo'}
               </button>
             </form>
             {enrich.error && <p className="error">{enrich.error.message}</p>}
+            {coverDraft && (
+              <CoverCornerEditor
+                key={coverDraft.id}
+                draft={coverDraft}
+                onConfirm={(corners) => confirmCover.mutate(corners)}
+                pending={confirmCover.isPending}
+              />
+            )}
+            {confirmCover.error && <p className="error">{confirmCover.error.message}</p>}
             {proposal && (
               <div>
                 <p>Review detected details, then choose what to apply.</p>
@@ -546,11 +643,16 @@ function BookDetails() {
                           setSelectedProposalFields(
                             event.target.checked
                               ? [...selectedProposalFields, field]
-                              : selectedProposalFields.filter((selectedField) => selectedField !== field),
+                              : selectedProposalFields.filter(
+                                  (selectedField) => selectedField !== field,
+                                ),
                           )
                         }
                       />
-                      {field}: {Array.isArray(proposal[field]) ? proposal[field].join(', ') : proposal[field]}
+                      {field}:{' '}
+                      {Array.isArray(proposal[field])
+                        ? proposal[field].join(', ')
+                        : proposal[field]}
                     </label>
                   ))}
                 <button

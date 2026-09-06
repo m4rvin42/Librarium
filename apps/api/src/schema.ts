@@ -99,3 +99,17 @@ export const appSettings = sqliteTable('app_settings', {
   value: text().notNull(),
   updatedAt: text('updated_at').notNull(),
 });
+export const coverDrafts = sqliteTable('cover_drafts', {
+  id: text().primaryKey(),
+  bookId: text('book_id')
+    .notNull()
+    .references(() => books.id, { onDelete: 'cascade' }),
+  sourcePath: text('source_path').notNull(),
+  width: integer().notNull(),
+  height: integer().notNull(),
+  corners: text().notNull(),
+  status: text().notNull(),
+  expiresAt: text('expires_at').notNull(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});

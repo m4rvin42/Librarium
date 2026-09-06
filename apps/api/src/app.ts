@@ -13,6 +13,7 @@ import staticPlugin from '@fastify/static';
 import {
   BookInput,
   BookPatch,
+  CoverDraftConfirmInput,
   ReadingSessionInput,
   extractIsbns,
   parseIsbn,
@@ -30,7 +31,14 @@ import {
 } from './repository.js';
 import { lookupIsbn, searchMetadata } from './metadata.js';
 import { metadataSettingsStatus, saveMetadataSettings } from './metadata-settings.js';
-import { analyzeImage, detectBarcode, normalizeImage } from './images.js';
+import {
+  analyzeCoverCorners,
+  analyzeImage,
+  detectBarcode,
+  normalizeImage,
+  straightenCover,
+  validateCoverCorners,
+} from './images.js';
 
 const hash = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
 const safeEqual = (a: string, b: string) =>
@@ -67,19 +75,25 @@ export async function buildApp() {
 
   app.setErrorHandler(
     (cause: Error & { statusCode?: number; code?: string; details?: unknown }, request, reply) => {
-    request.log.warn({ err: cause }, 'Request failed');
-    const batchId = (request as any).importBatchId;
-    if (batchId)
-      db.prepare("UPDATE import_batches SET status='failed',error=?,updated_at=? WHERE id=?").run(
-        cause.message,
-        now(),
-        batchId,
-      );
-    const isConstraint =
-      typeof cause.code === 'string' && cause.code.startsWith('SQLITE_CONSTRAINT');
-    const status = cause.statusCode || (isConstraint ? 409 : 400);
-    const code =
-      status === 409 ? 'CONFLICT' : cause.code === 'METADATA_PROVIDER_UNAVAILABLE' || cause.code === 'SETTINGS_ENCRYPTION_UNAVAILABLE' ? cause.code : 'BAD_REQUEST';
+      request.log.warn({ err: cause }, 'Request failed');
+      const batchId = (request as any).importBatchId;
+      if (batchId)
+        db.prepare("UPDATE import_batches SET status='failed',error=?,updated_at=? WHERE id=?").run(
+          cause.message,
+          now(),
+          batchId,
+        );
+      const isConstraint =
+        typeof cause.code === 'string' && cause.code.startsWith('SQLITE_CONSTRAINT');
+      const status = cause.statusCode || (isConstraint ? 409 : 400);
+      const code =
+        status === 409
+          ? 'CONFLICT'
+          : cause.code === 'METADATA_PROVIDER_UNAVAILABLE' ||
+              cause.code === 'SETTINGS_ENCRYPTION_UNAVAILABLE' ||
+              cause.code === 'COVER_STRAIGHTENING_UNAVAILABLE'
+            ? cause.code
+            : 'BAD_REQUEST';
       reply.code(status).send(error(code, cause.message, cause.details));
     },
   );
@@ -182,6 +196,20 @@ export async function buildApp() {
       return reply.code(404).send(error('NOT_FOUND', 'Local cover not found'));
     return reply.type('image/jpeg').send(fs.createReadStream(coverPath));
   });
+  app.get('/api/v1/books/:id/cover-drafts/:draftId', async (req, reply) => {
+    const { id: bookId, draftId } = req.params as any;
+    const draft = db
+      .prepare(
+        "SELECT source_path FROM cover_drafts WHERE id=? AND book_id=? AND status='pending' AND expires_at>?",
+      )
+      .get(draftId, bookId, now()) as { source_path: string } | undefined;
+    if (!draft) return reply.code(404).send(error('NOT_FOUND', 'Cover draft not found'));
+    const imageRoot = path.resolve(config.dataDir, 'images');
+    const sourcePath = path.resolve(imageRoot, draft.source_path);
+    if (!sourcePath.startsWith(`${imageRoot}${path.sep}`) || !fs.existsSync(sourcePath))
+      return reply.code(404).send(error('NOT_FOUND', 'Cover draft not found'));
+    return reply.type('image/jpeg').send(fs.createReadStream(sourcePath));
+  });
   app.post('/api/v1/books/:id/enrich', async (req, reply) => {
     const bookId = (req.params as any).id;
     if (!getBook(bookId)) return reply.code(404).send(error('NOT_FOUND', 'Book not found'));
@@ -189,13 +217,45 @@ export async function buildApp() {
     if (!part?.mimetype.startsWith('image/'))
       return reply.code(400).send(error('INVALID_IMAGE', 'Upload one image to enhance this book'));
     const imageId = id();
-    const relativeCover = path.join('books', bookId, `${imageId}.jpg`);
+    const useAsCover = String((part.fields as any)?.useAsCover?.value || '') === 'true';
+    const straightenRequested =
+      useAsCover && String((part.fields as any)?.straightenCover?.value || '') === 'true';
+    const relativeImage = straightenRequested
+      ? path.join('books', bookId, 'drafts', `${imageId}.jpg`)
+      : path.join('books', bookId, `${imageId}.jpg`);
     const normalized = await normalizeImage(
       await part.toBuffer(),
-      path.join(config.dataDir, 'images', relativeCover),
+      path.join(config.dataDir, 'images', relativeImage),
     );
-    const useAsCover = String((part.fields as any)?.useAsCover?.value || '') === 'true';
-    if (useAsCover) setBookLocalCover(bookId, relativeCover);
+    let coverDraft: any = null;
+    if (straightenRequested) {
+      try {
+        const corners = await analyzeCoverCorners(normalized.buffer);
+        const timestamp = now();
+        db.prepare(
+          'INSERT INTO cover_drafts(id,book_id,source_path,width,height,corners,status,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+        ).run(
+          imageId,
+          bookId,
+          relativeImage,
+          normalized.width,
+          normalized.height,
+          JSON.stringify(corners),
+          'pending',
+          new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+          timestamp,
+          timestamp,
+        );
+        coverDraft = {
+          id: imageId,
+          corners,
+          previewUrl: `/api/v1/books/${bookId}/cover-drafts/${imageId}`,
+        };
+      } catch (cause) {
+        await fsp.unlink(path.join(config.dataDir, 'images', relativeImage)).catch(() => undefined);
+        throw cause;
+      }
+    } else if (useAsCover) setBookLocalCover(bookId, relativeImage);
     let metadata: any = null;
     let proposal: any = null;
     const isbn = await detectBarcode(normalized.buffer);
@@ -218,24 +278,62 @@ export async function buildApp() {
             } catch {
               metadata = null;
             }
-          proposal =
-            metadata ?? {
-              title: detected.title,
-              authors: detected.author ? [detected.author] : [],
-              isbn10: detected.isbn10,
-              isbn13: detected.isbn13,
-              confidence: detected.confidence,
-            };
+          proposal = metadata ?? {
+            title: detected.title,
+            authors: detected.author ? [detected.author] : [],
+            isbn10: detected.isbn10,
+            isbn13: detected.isbn13,
+            confidence: detected.confidence,
+          };
         }
       } catch {
         proposal = null;
       }
     }
     return reply.code(201).send({
-      coverUpdated: useAsCover,
+      coverUpdated: useAsCover && !straightenRequested,
+      coverDraft,
       proposal,
-      previewUrl: `/api/v1/books/${bookId}/cover`,
+      previewUrl: coverDraft?.previewUrl ?? `/api/v1/books/${bookId}/cover`,
     });
+  });
+  app.post('/api/v1/books/:id/cover-drafts/:draftId/confirm', async (req, reply) => {
+    const { id: bookId, draftId } = req.params as any;
+    const { corners } = CoverDraftConfirmInput.parse(
+      Array.isArray(req.body) ? { corners: req.body } : req.body,
+    );
+    const draft = db
+      .prepare(
+        "SELECT * FROM cover_drafts WHERE id=? AND book_id=? AND status='pending' AND expires_at>?",
+      )
+      .get(draftId, bookId, now()) as any;
+    if (!draft) return reply.code(404).send(error('NOT_FOUND', 'Cover draft not found'));
+    const imageRoot = path.resolve(config.dataDir, 'images');
+    const sourcePath = path.resolve(imageRoot, draft.source_path);
+    if (!sourcePath.startsWith(`${imageRoot}${path.sep}`) || !fs.existsSync(sourcePath))
+      return reply.code(404).send(error('NOT_FOUND', 'Cover draft not found'));
+    const finalCover = path.join('books', bookId, `${draftId}.jpg`);
+    const finalPath = path.join(imageRoot, finalCover);
+    const straightened = await straightenCover(
+      await fsp.readFile(sourcePath),
+      validateCoverCorners({ corners }),
+    );
+    await fsp.mkdir(path.dirname(finalPath), { recursive: true });
+    await fsp.writeFile(finalPath, straightened);
+    const timestamp = now();
+    db.transaction(() => {
+      db.prepare('UPDATE books SET local_cover=?,updated_at=? WHERE id=?').run(
+        finalCover,
+        timestamp,
+        bookId,
+      );
+      db.prepare("UPDATE cover_drafts SET status='applied',corners=?,updated_at=? WHERE id=?").run(
+        JSON.stringify(corners),
+        timestamp,
+        draftId,
+      );
+    })();
+    return reply.send({ book: getBook(bookId), coverUrl: `/api/v1/books/${bookId}/cover` });
   });
   app.patch(
     '/api/v1/books/:id',
@@ -698,7 +796,8 @@ export async function buildApp() {
       const version = source
         .prepare('SELECT max(version) version FROM schema_migrations')
         .get() as any;
-      if (![1, 2].includes(version?.version)) throw new Error('Unsupported Librarium database schema');
+      if (![1, 2].includes(version?.version))
+        throw new Error('Unsupported Librarium database schema');
       source.prepare('PRAGMA integrity_check').get();
     } finally {
       source.close();
@@ -727,9 +826,7 @@ export async function buildApp() {
     },
     maxImageSizeMb: config.maxImageMb,
   }));
-  app.put('/api/v1/settings/metadata', async (req) =>
-    saveMetadataSettings(req.body),
-  );
+  app.put('/api/v1/settings/metadata', async (req) => saveMetadataSettings(req.body));
 
   const publicDir = path.resolve('dist/public');
   if (fs.existsSync(publicDir)) {

@@ -61,7 +61,10 @@ export const MetadataSettingsInput = z.object({
     .array(MetadataProvider)
     .min(1)
     .max(metadataProviders.length)
-    .refine((providers) => new Set(providers).size === providers.length, 'Providers must be unique'),
+    .refine(
+      (providers) => new Set(providers).size === providers.length,
+      'Providers must be unique',
+    ),
   googleBooksApiKey: z.string().trim().min(1).max(512).optional(),
   clearGoogleBooksApiKey: z.boolean().optional(),
 });
@@ -81,5 +84,12 @@ export const OpenAiMetadataResult = z.object({
   isbn13: z.string().nullable(),
   editionFormat: z.string().max(100).nullable(),
 });
+
+export const CoverCornersInput = z.object({
+  corners: z
+    .array(z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) }))
+    .length(4),
+});
+export const CoverDraftConfirmInput = CoverCornersInput;
 
 export type ApiError = { error: { code: string; message: string; details?: unknown } };

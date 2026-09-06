@@ -288,6 +288,40 @@ dd {
 .muted {
   color: #666;
 }
+.cover-review {
+  margin-top: 20px;
+}
+.cover-review h4 {
+  margin: 0;
+}
+.cover-corner-editor {
+  position: relative;
+  width: min(100%, 360px);
+  margin: 14px 0;
+  touch-action: none;
+}
+.cover-corner-editor img {
+  display: block;
+  width: 100%;
+  border-radius: 8px;
+}
+.cover-corner-editor svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.cover-corner-editor polygon {
+  fill: #b95f3d33;
+  stroke: #b95f3d;
+  stroke-width: 0.008;
+}
+.cover-corner-editor circle {
+  fill: #fff;
+  stroke: #17352d;
+  stroke-width: 0.009;
+  cursor: grab;
+}
 .list-view .book-grid {
   display: grid;
   grid-template-columns: 1fr;

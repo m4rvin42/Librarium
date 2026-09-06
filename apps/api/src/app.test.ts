@@ -6,7 +6,7 @@ import { db, id, now } from './db.js';
 const app = await buildApp();
 beforeEach(() => {
   db.exec(
-    'DELETE FROM reading_sessions; DELETE FROM import_candidates; DELETE FROM import_images; DELETE FROM import_batches; DELETE FROM book_authors; DELETE FROM book_categories; DELETE FROM books; DELETE FROM authors; DELETE FROM categories; DELETE FROM sessions;',
+    'DELETE FROM cover_drafts; DELETE FROM reading_sessions; DELETE FROM import_candidates; DELETE FROM import_images; DELETE FROM import_batches; DELETE FROM book_authors; DELETE FROM book_categories; DELETE FROM books; DELETE FROM authors; DELETE FROM categories; DELETE FROM sessions;',
   );
 });
 afterAll(() => app.close());
