@@ -20,12 +20,32 @@ import { api, setCsrf } from './api';
 import './styles.css';
 
 const queryClient = new QueryClient();
+const enrichmentFields = [
+  'title',
+  'subtitle',
+  'authors',
+  'isbn13',
+  'publisher',
+  'publicationDate',
+  'language',
+  'pageCount',
+  'description',
+  'categories',
+  'editionFormat',
+  'coverUrl',
+] as const;
 type Book = {
   id: string;
   title: string;
   subtitle?: string;
   authors: string[];
   coverUrl?: string;
+  localCover?: string;
+  publisher?: string;
+  publicationDate?: string;
+  language?: string;
+  pageCount?: number;
+  description?: string;
   isbn13?: string;
   readingStatus: string;
   ownershipStatus: string;
@@ -120,7 +140,9 @@ export function BookGrid({ books }: { books: Book[] }) {
     <div className="book-grid">
       {books.map((book) => (
         <Link className="book-card" to={`/books/${book.id}`} key={book.id}>
-          {book.coverUrl ? (
+          {book.localCover ? (
+            <img src={`/api/v1/books/${book.id}/cover`} alt="" />
+          ) : book.coverUrl ? (
             <img src={book.coverUrl} alt="" />
           ) : (
             <div className="cover-fallback">L</div>
@@ -279,6 +301,8 @@ function BookDetails() {
     navigate = useNavigate(),
     qc = useQueryClient(),
     [editing, setEditing] = useState(false);
+  const [proposal, setProposal] = useState<any>(null);
+  const [selectedProposalFields, setSelectedProposalFields] = useState<string[]>([]);
   const query = useQuery({ queryKey: ['book', id], queryFn: () => api<Book>(`/books/${id}`) });
   const remove = useMutation({
     mutationFn: () => api(`/books/${id}`, { method: 'DELETE' }),
@@ -300,13 +324,31 @@ function BookDetails() {
       api(`/books/${id}/reading-sessions`, { method: 'POST', body: JSON.stringify(session) }),
     onSuccess: () => query.refetch(),
   });
+  const enrich = useMutation({
+    mutationFn: (form: FormData) => api<any>(`/books/${id}/enrich`, { method: 'POST', body: form }),
+    onSuccess: (result) => {
+      setProposal(result.proposal);
+      setSelectedProposalFields(
+        enrichmentFields.filter(
+          (field) => result.proposal[field] !== null && result.proposal[field] !== undefined,
+        ),
+      );
+      if (result.coverUpdated) query.refetch();
+    },
+  });
   if (!query.data) return <main>{query.isLoading ? 'Loading…' : 'Book not found'}</main>;
   const b = query.data;
   return (
     <main>
       <Link to="/library">← Library</Link>
       <article className="details">
-        {b.coverUrl ? <img src={b.coverUrl} alt="" /> : <div className="large-cover">L</div>}
+        {b.localCover ? (
+          <img src={`/api/v1/books/${b.id}/cover`} alt="" />
+        ) : b.coverUrl ? (
+          <img src={b.coverUrl} alt="" />
+        ) : (
+          <div className="large-cover">L</div>
+        )}
         <div>
           <p className="eyebrow">
             {b.editionFormat || 'Book'} · {b.readingStatus}
@@ -370,11 +412,19 @@ function BookDetails() {
                 const f = new FormData(e.currentTarget);
                 save.mutate({
                   title: f.get('title'),
+                  subtitle: f.get('subtitle') || null,
                   authors: String(f.get('authors') || '')
                     .split(',')
                     .map((x) => x.trim())
                     .filter(Boolean),
                   publisher: f.get('publisher') || null,
+                  publicationDate: f.get('publicationDate') || null,
+                  language: f.get('language') || null,
+                  pageCount: f.get('pageCount') ? Number(f.get('pageCount')) : null,
+                  description: f.get('description') || null,
+                  isbn13: f.get('isbn13') || null,
+                  coverUrl: f.get('coverUrl') || null,
+                  editionFormat: f.get('editionFormat') || null,
                   categories: String(f.get('categories') || '')
                     .split(',')
                     .map((x) => x.trim())
@@ -395,8 +445,40 @@ function BookDetails() {
                 <input name="authors" defaultValue={b.authors.join(', ')} />
               </label>
               <label>
+                ISBN-13
+                <input name="isbn13" defaultValue={b.isbn13} />
+              </label>
+              <label>
+                Subtitle
+                <input name="subtitle" defaultValue={b.subtitle} />
+              </label>
+              <label>
                 Publisher
                 <input name="publisher" defaultValue={(b as any).publisher} />
+              </label>
+              <label>
+                Publication date
+                <input name="publicationDate" defaultValue={b.publicationDate} />
+              </label>
+              <label>
+                Language
+                <input name="language" defaultValue={b.language} />
+              </label>
+              <label>
+                Pages
+                <input name="pageCount" type="number" min="1" defaultValue={b.pageCount} />
+              </label>
+              <label>
+                Edition format
+                <input name="editionFormat" defaultValue={b.editionFormat} />
+              </label>
+              <label>
+                Remote cover URL
+                <input name="coverUrl" type="url" defaultValue={b.coverUrl} />
+              </label>
+              <label>
+                Description
+                <textarea name="description" defaultValue={b.description} />
               </label>
               <label>
                 Categories
@@ -429,6 +511,62 @@ function BookDetails() {
               <button>Save changes</button>
             </form>
           )}
+          <section className="panel">
+            <h3>Enhance from photo</h3>
+            <p className="muted">Upload a barcode, spine, copyright page, or front cover.</p>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                enrich.mutate(new FormData(event.currentTarget));
+              }}
+            >
+              <label>
+                Image
+                <input name="image" type="file" accept="image/*" capture="environment" required />
+              </label>
+              <label>
+                <input name="useAsCover" type="checkbox" value="true" /> Use this image as the cover
+              </label>
+              <button disabled={enrich.isPending}>
+                {enrich.isPending ? 'Analysing…' : 'Analyse photo'}
+              </button>
+            </form>
+            {enrich.error && <p className="error">{enrich.error.message}</p>}
+            {proposal && (
+              <div>
+                <p>Review detected details, then choose what to apply.</p>
+                {enrichmentFields
+                  .filter((field) => proposal[field] !== null && proposal[field] !== undefined)
+                  .map((field) => (
+                    <label key={field}>
+                      <input
+                        type="checkbox"
+                        checked={selectedProposalFields.includes(field)}
+                        onChange={(event) =>
+                          setSelectedProposalFields(
+                            event.target.checked
+                              ? [...selectedProposalFields, field]
+                              : selectedProposalFields.filter((selectedField) => selectedField !== field),
+                          )
+                        }
+                      />
+                      {field}: {Array.isArray(proposal[field]) ? proposal[field].join(', ') : proposal[field]}
+                    </label>
+                  ))}
+                <button
+                  onClick={() => {
+                    const patch = Object.fromEntries(
+                      selectedProposalFields.map((field) => [field, proposal[field]]),
+                    );
+                    save.mutate(patch);
+                    setProposal(null);
+                  }}
+                >
+                  Apply selected details
+                </button>
+              </div>
+            )}
+          </section>
           <button onClick={() => setEditing(!editing)}>{editing ? 'Cancel' : 'Edit book'}</button>{' '}
           <button
             className="danger"

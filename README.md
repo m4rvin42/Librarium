@@ -54,7 +54,7 @@ Without OpenAI credentials, manual and ISBN workflows remain usable. Selecting O
 
 ## Workflows
 
-Use **Add books** for manual data, an ISBN, pasted ISBNs, or camera/file images. ISBN checksums are validated and duplicates conflict. Images are orientation-corrected, metadata-stripped, resized, and scanned locally. AI output is Zod-validated and kept on the review screen; ambiguous title matches require edition selection.
+Use **Add books** for manual data, an ISBN, pasted ISBNs, or camera/file images. ISBN checksums are validated and duplicates conflict. Images are orientation-corrected, metadata-stripped, resized, and scanned locally. AI output is Zod-validated and kept on the review screen; ambiguous title matches require edition selection. Existing books can be enhanced with barcode, spine, copyright-page, or cover photos; detected fields remain reviewable and a chosen local cover overrides remote cover art.
 
 Interactive API documentation is at /api/docs. n8n example:
 

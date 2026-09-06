@@ -25,6 +25,7 @@ import {
   findBookByIsbn,
   getBook,
   listBooks,
+  setBookLocalCover,
   updateBook,
 } from './repository.js';
 import { lookupIsbn, searchMetadata } from './metadata.js';
@@ -172,6 +173,70 @@ export async function buildApp() {
     async (req, reply) =>
       getBook((req.params as any).id) ?? reply.code(404).send(error('NOT_FOUND', 'Book not found')),
   );
+  app.get('/api/v1/books/:id/cover', async (req, reply) => {
+    const book = getBook((req.params as any).id);
+    if (!book?.localCover) return reply.code(404).send(error('NOT_FOUND', 'Local cover not found'));
+    const imageRoot = path.resolve(config.dataDir, 'images');
+    const coverPath = path.resolve(imageRoot, book.localCover);
+    if (!coverPath.startsWith(`${imageRoot}${path.sep}`) || !fs.existsSync(coverPath))
+      return reply.code(404).send(error('NOT_FOUND', 'Local cover not found'));
+    return reply.type('image/jpeg').send(fs.createReadStream(coverPath));
+  });
+  app.post('/api/v1/books/:id/enrich', async (req, reply) => {
+    const bookId = (req.params as any).id;
+    if (!getBook(bookId)) return reply.code(404).send(error('NOT_FOUND', 'Book not found'));
+    const part = await req.file();
+    if (!part?.mimetype.startsWith('image/'))
+      return reply.code(400).send(error('INVALID_IMAGE', 'Upload one image to enhance this book'));
+    const imageId = id();
+    const relativeCover = path.join('books', bookId, `${imageId}.jpg`);
+    const normalized = await normalizeImage(
+      await part.toBuffer(),
+      path.join(config.dataDir, 'images', relativeCover),
+    );
+    const useAsCover = String((part.fields as any)?.useAsCover?.value || '') === 'true';
+    if (useAsCover) setBookLocalCover(bookId, relativeCover);
+    let metadata: any = null;
+    let proposal: any = null;
+    const isbn = await detectBarcode(normalized.buffer);
+    if (isbn) {
+      try {
+        metadata = await lookupIsbn(isbn);
+      } catch {
+        metadata = null;
+      }
+      proposal = metadata ?? { isbn13: isbn, isbn10: parseIsbn(isbn).isbn10 };
+    } else {
+      try {
+        const detected = (await analyzeImage(normalized.buffer)).books.find(
+          (candidate) => candidate.title || candidate.isbn13,
+        );
+        if (detected) {
+          if (detected.isbn13)
+            try {
+              metadata = await lookupIsbn(detected.isbn13);
+            } catch {
+              metadata = null;
+            }
+          proposal =
+            metadata ?? {
+              title: detected.title,
+              authors: detected.author ? [detected.author] : [],
+              isbn10: detected.isbn10,
+              isbn13: detected.isbn13,
+              confidence: detected.confidence,
+            };
+        }
+      } catch {
+        proposal = null;
+      }
+    }
+    return reply.code(201).send({
+      coverUpdated: useAsCover,
+      proposal,
+      previewUrl: `/api/v1/books/${bookId}/cover`,
+    });
+  });
   app.patch(
     '/api/v1/books/:id',
     async (req, reply) =>

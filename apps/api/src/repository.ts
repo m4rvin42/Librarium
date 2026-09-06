@@ -137,6 +137,13 @@ export function updateBook(bookId: string, patch: Record<string, any>) {
   })();
 }
 
+export function setBookLocalCover(bookId: string, localCover: string | null) {
+  const result = db
+    .prepare('UPDATE books SET local_cover=?,updated_at=? WHERE id=?')
+    .run(localCover, now(), bookId);
+  return result.changes ? getBook(bookId) : null;
+}
+
 export const deleteBook = (bookId: string) =>
   db.prepare('DELETE FROM books WHERE id=?').run(bookId).changes > 0;
 

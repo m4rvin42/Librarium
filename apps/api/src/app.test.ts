@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import sharp from 'sharp';
 import { buildApp } from './app.js';
 import { db, id, now } from './db.js';
 
@@ -102,6 +103,40 @@ describe('API', () => {
     });
     expect(duplicate.statusCode).toBe(409);
     expect(duplicate.json().error.code).toBe('CONFLICT');
+  });
+  it('stores and serves a local cover for an existing book', async () => {
+    const book = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/books',
+        headers: bearer,
+        payload: { title: 'Cover Book', authors: [] },
+      })
+    ).json();
+    const boundary = 'librarium-cover-test';
+    const image = await sharp({
+      create: { width: 1, height: 1, channels: 3, background: { r: 20, g: 40, b: 60 } },
+    })
+      .jpeg()
+      .toBuffer();
+    const payload = Buffer.concat([
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="useAsCover"\r\n\r\ntrue\r\n--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="cover.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`,
+      ),
+      image,
+      Buffer.from(`\r\n--${boundary}--\r\n`),
+    ]);
+    const enriched = await app.inject({
+      method: 'POST',
+      url: `/api/v1/books/${book.id}/enrich`,
+      headers: { ...bearer, 'content-type': `multipart/form-data; boundary=${boundary}` },
+      payload,
+    });
+    expect(enriched.statusCode).toBe(201);
+    expect(enriched.json().coverUpdated).toBe(true);
+    const cover = await app.inject({ url: `/api/v1/books/${book.id}/cover`, headers: bearer });
+    expect(cover.statusCode).toBe(200);
+    expect(cover.headers['content-type']).toContain('image/jpeg');
   });
   it('keeps AI candidates pending until approval', async () => {
     const batch = id(),
