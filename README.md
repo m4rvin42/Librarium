@@ -16,6 +16,8 @@ See [architecture details](docs/architecture.md).
 
 ## Docker deployment
 
+### Build from this repository
+
 1. Copy .env.example to .env.
 2. Set a strong ADMIN_PASSWORD and, for API use, a random API_TOKEN.
 3. Optionally set OPENLIBRARY_CONTACT_EMAIL and GOOGLE_BOOKS_API_KEY. Set SETTINGS_ENCRYPTION_KEY to manage the Google key in Settings. Image recognition also needs OPENAI_API_KEY and OPENAI_VISION_MODEL.
@@ -23,6 +25,10 @@ See [architecture details](docs/architecture.md).
 5. Open http://localhost:8787 and sign in as ADMIN_USERNAME (default admin).
 
 The volume contains /data/librarium.sqlite, /data/images, /data/imports, and /data/backups. Inspect with docker compose ps and docker compose logs -f librarium.
+
+### Deploy a published image
+
+Release images are available from GitHub Container Registry, so another Compose project can use `image: ghcr.io/m4rvin42/librarium:<version>` without cloning this repository or building locally. See [published-image deployment](docs/container-image-deployment.md) for a complete Compose file, configuration, updates, and registry-access notes.
 
 ## Development
 
@@ -67,7 +73,7 @@ Cookie mutations require the CSRF token returned by login or /auth/me; bearer re
 
 Settings downloads versioned JSON or a consistent SQLite snapshot. JSON import validates the document, supports dry runs, and accepts skip, merge, or replace. SQLite restore requires explicit confirmation, validates schema/integrity, and makes an automatic backup. See [backup and restore](docs/backup-and-restore.md).
 
-Before updating, download a backup, then run git pull and docker compose up -d --build. Migrations run at startup.
+Before updating a source deployment, download a backup, then run git pull and docker compose up -d --build. For a published-image deployment, update the image tag and run docker compose pull followed by docker compose up -d. Migrations run at startup.
 
 - Login 503 means ADMIN_PASSWORD is empty.
 - Unknown ISBNs may be absent from both configured providers; add them manually.
