@@ -30,6 +30,12 @@ The volume contains /data/librarium.sqlite, /data/images, /data/imports, and /da
 
 Release images are available from GitHub Container Registry, so another Compose project can use `image: ghcr.io/m4rvin42/librarium:<version>` without cloning this repository or building locally. See [published-image deployment](docs/container-image-deployment.md) for a complete Compose file, configuration, updates, and registry-access notes.
 
+Pull the latest published image with:
+
+```sh
+docker pull ghcr.io/m4rvin42/librarium:latest
+```
+
 ## Development
 
 Node.js 22 is required. Run npm ci, copy .env.example to .env, point DATABASE_PATH and DATA_DIRECTORY at local writable paths, then run npm run db:migrate, npm run db:seed, and npm run dev. Vite runs at http://localhost:5173 and proxies Fastify on port 3000.
