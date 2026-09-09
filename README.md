@@ -44,23 +44,25 @@ Verify with npm run lint, npm run typecheck, npm test, and npm run build.
 
 ## Configuration
 
-| Variable                        | Purpose                                      |
-| ------------------------------- | -------------------------------------------- |
-| PORT                            | Internal HTTP port                           |
-| DATABASE_PATH / DATA_DIRECTORY  | SQLite and managed-file paths                |
-| TZ                              | Container timezone                           |
-| ADMIN_USERNAME / ADMIN_PASSWORD | Single administrator; password is required   |
-| API_TOKEN                       | Optional bearer token for n8n/mobile clients |
-| COOKIE_SECURE                   | Set true when served through HTTPS           |
-| OPENAI_API_KEY                  | Server-only key                              |
-| OPENAI_VISION_MODEL             | Vision-capable Responses API model           |
-| OPENAI_METADATA_MODEL           | Web-search ISBN fallback model; defaults to vision model |
-| OPENAI_IMAGE_ANALYSIS_ENABLED   | Feature switch                               |
-| METADATA_PROVIDERS              | Comma-separated order, e.g. openlibrary,googlebooks |
-| OPENLIBRARY_CONTACT_EMAIL       | Identifies metadata requests                 |
-| GOOGLE_BOOKS_API_KEY            | Google Books API key; recommended for quota  |
-| SETTINGS_ENCRYPTION_KEY         | Base64-encoded 32-byte key for encrypted UI credentials |
-| MAX_IMAGE_SIZE_MB               | Per-image upload limit                       |
+| Variable                                | Purpose                                                  |
+| --------------------------------------- | -------------------------------------------------------- |
+| PORT                                    | Internal HTTP port                                       |
+| DATABASE_PATH / DATA_DIRECTORY          | SQLite and managed-file paths                            |
+| TZ                                      | Container timezone                                       |
+| ADMIN_USERNAME / ADMIN_PASSWORD         | Single administrator; password is required               |
+| API_TOKEN                               | Optional bearer token for n8n/mobile clients             |
+| COOKIE_SECURE                           | Set true when served through HTTPS                       |
+| OPENAI_API_KEY                          | Server-only key                                          |
+| OPENAI_VISION_MODEL                     | Vision-capable Responses API model                       |
+| OPENAI_METADATA_MODEL                   | Web-search ISBN fallback model; defaults to vision model |
+| OPENAI_RECOMMENDATION_MODEL             | Optional metadata-only recommendation reranker model     |
+| OPENAI_IMAGE_ANALYSIS_ENABLED           | Feature switch                                           |
+| METADATA_PROVIDERS                      | Comma-separated order, e.g. openlibrary,googlebooks      |
+| OPENLIBRARY_CONTACT_EMAIL               | Identifies metadata requests                             |
+| GOOGLE_BOOKS_API_KEY                    | Google Books API key; recommended for quota              |
+| SETTINGS_ENCRYPTION_KEY                 | Base64-encoded 32-byte key for encrypted UI credentials  |
+| MAX_IMAGE_SIZE_MB                       | Per-image upload limit                                   |
+| MCP_ALLOWED_HOSTS / MCP_ALLOWED_ORIGINS | Optional comma-separated browser MCP allowlists          |
 
 Without OpenAI credentials, manual and ISBN workflows remain usable. Selecting OpenAI web search as a metadata provider sends the ISBN query to OpenAI and its search service.
 
@@ -68,7 +70,12 @@ Without OpenAI credentials, manual and ISBN workflows remain usable. Selecting O
 
 Use **Add books** for manual data, an ISBN, pasted ISBNs, or camera/file images. ISBN checksums are validated and duplicates conflict. Images are orientation-corrected, metadata-stripped, resized, and scanned locally. AI output is Zod-validated and kept on the review screen; ambiguous title matches require edition selection. Existing books can be enhanced with barcode, spine, copyright-page, or cover photos; detected fields remain reviewable and a chosen local cover overrides remote cover art. When adding a local cover, **Automatically straighten cover** uses the configured OpenAI vision model to suggest its corners; review and adjust all four points before confirming the corrected image.
 
-Interactive API documentation is at /api/docs. n8n example:
+Interactive API documentation is at `/api/docs`; the curated assistant reference is at
+`/api/assistant-docs`. Librarium also exposes a stateless Streamable HTTP MCP endpoint at
+`/api/v1/mcp`. Create named, scoped assistant credentials in Settings rather than sharing the
+administrator password or legacy `API_TOKEN`. See [assistant integration](docs/assistant-integration.md).
+
+n8n example:
 
     GET http://librarium:3000/api/v1/books?search=asimov
     Authorization: Bearer <API_TOKEN>

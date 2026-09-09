@@ -10,11 +10,19 @@ import rateLimit from '@fastify/rate-limit';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import staticPlugin from '@fastify/static';
+import { z } from 'zod';
 import {
+  ApiCredentialInput,
   BookInput,
+  BookQuery,
   BookPatch,
+  ConfirmationAction,
   CoverDraftConfirmInput,
+  DiscoveryInput,
   ReadingSessionInput,
+  ReadingSessionQuery,
+  RecommendationInput,
+  RecommendationSettingsInput,
   extractIsbns,
   parseIsbn,
 } from '@librarium/shared';
@@ -28,6 +36,12 @@ import {
   listBooks,
   setBookLocalCover,
   updateBook,
+  libraryFacets,
+  librarySummary,
+  listTrash,
+  permanentlyDeleteBook,
+  restoreBook,
+  refreshAllBookSearch,
 } from './repository.js';
 import { lookupIsbn, searchMetadata } from './metadata.js';
 import { metadataSettingsStatus, saveMetadataSettings } from './metadata-settings.js';
@@ -39,6 +53,34 @@ import {
   straightenCover,
   validateCoverCorners,
 } from './images.js';
+import {
+  allCredentialScopes,
+  AssistantIdentity,
+  audit,
+  authenticateCredential,
+  createCredential,
+  hasScope,
+  listAuditEvents,
+  listCredentials,
+  findIdempotentResponse,
+  requireScope,
+  requestDigest,
+  revokeCredential,
+  saveIdempotentResponse,
+} from './assistant-auth.js';
+import {
+  createDiscovery,
+  executeConfirmation,
+  listImports,
+  listReadingSessions,
+  prepareConfirmation,
+} from './assistant-service.js';
+import { recommendBooks } from './recommendations.js';
+import {
+  recommendationConfiguration,
+  saveRecommendationSettings,
+} from './recommendation-settings.js';
+import { handleMcpRequest } from './mcp.js';
 
 const hash = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
 const safeEqual = (a: string, b: string) =>
@@ -46,8 +88,30 @@ const safeEqual = (a: string, b: string) =>
 const error = (code: string, message: string, details?: unknown) => ({
   error: { code, message, ...(details === undefined ? {} : { details }) },
 });
+function jsonSchema(schema: z.ZodType) {
+  const converted = z.toJSONSchema(schema, { target: 'draft-7', unrepresentable: 'any' }) as any;
+  const stripDefaults = (value: any): any => {
+    if (Array.isArray(value)) return value.map(stripDefaults);
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => key !== 'default')
+        .map(([key, child]) => [key, stripDefaults(child)]),
+    );
+  };
+  return stripDefaults(converted);
+}
+
+function assistantSafeBook(book: any) {
+  if (!book) return book;
+  const safe = { ...book };
+  delete safe.localCover;
+  delete safe.coverUrl;
+  return { ...safe, coverAvailable: Boolean(book.localCover || book.coverUrl) };
+}
 
 export async function buildApp() {
+  const credentialWindows = new Map<string, { startedAt: number; count: number }>();
   const app = Fastify({
     logger: {
       redact: [
@@ -68,10 +132,75 @@ export async function buildApp() {
   await app.register(swagger, {
     openapi: {
       info: { title: 'Librarium API', version: '1.0.0' },
-      components: { securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer' } } },
+      components: {
+        securitySchemes: {
+          bearerAuth: { type: 'http', scheme: 'bearer' },
+          cookieAuth: { type: 'apiKey', in: 'cookie', name: 'librarium_session' },
+        },
+      },
     },
   });
   await app.register(swaggerUi, { routePrefix: '/api/docs' });
+  // Runtime contracts are parsed with the shared Zod schemas in handlers. Route JSON Schemas are
+  // documentation-only so Zod defaults/transforms cannot change requests before those parsers run.
+  app.setValidatorCompiler(() => (data) => ({ value: data }));
+
+  app.addHook('onRoute', (route) => {
+    if (!route.url.startsWith('/api/v1/')) return;
+    const schema = (route.schema ??= {});
+    const method = (
+      (Array.isArray(route.method) ? route.method[0] : route.method) ?? 'GET'
+    ).toLowerCase();
+    schema.operationId ??= `${method}${
+      route.url
+        .replace('/api/v1', '')
+        .split('/')
+        .filter(Boolean)
+        .map((part) =>
+          part.startsWith(':')
+            ? `By${part.slice(1, 2).toUpperCase()}${part.slice(2)}`
+            : `${part.slice(0, 1).toUpperCase()}${part.slice(1).replaceAll('-', '')}`,
+        )
+        .join('') || 'Root'
+    }`;
+    schema.tags ??= [route.url.split('/')[3] || 'system'];
+    if (!['/api/v1/health', '/api/v1/auth/login'].includes(route.url))
+      schema.security ??= [{ bearerAuth: [] }, { cookieAuth: [] }];
+    const params = [...route.url.matchAll(/:([A-Za-z0-9_]+)/g)].map((match) => match[1]);
+    if (params.length && !schema.params)
+      schema.params = {
+        type: 'object',
+        properties: Object.fromEntries(params.map((name) => [name, { type: 'string' }])),
+        required: params,
+      };
+    if (!['get', 'head', 'delete'].includes(method) && !schema.body)
+      schema.body = { description: 'Request body; see the operation description and examples.' };
+    schema.response = {
+      ...(schema.response ?? { 200: { description: 'Successful response' } }),
+      400: { $ref: 'ApiError#' },
+      401: { $ref: 'ApiError#' },
+      403: { $ref: 'ApiError#' },
+      404: { $ref: 'ApiError#' },
+      409: { $ref: 'ApiError#' },
+    };
+  });
+
+  app.addSchema({
+    $id: 'ApiError',
+    type: 'object',
+    required: ['error'],
+    properties: {
+      error: {
+        type: 'object',
+        required: ['code', 'message'],
+        properties: {
+          code: { type: 'string' },
+          message: { type: 'string' },
+          details: {},
+        },
+      },
+    },
+  });
 
   app.setErrorHandler(
     (cause: Error & { statusCode?: number; code?: string; details?: unknown }, request, reply) => {
@@ -87,13 +216,15 @@ export async function buildApp() {
         typeof cause.code === 'string' && cause.code.startsWith('SQLITE_CONSTRAINT');
       const status = cause.statusCode || (isConstraint ? 409 : 400);
       const code =
-        status === 409
-          ? 'CONFLICT'
-          : cause.code === 'METADATA_PROVIDER_UNAVAILABLE' ||
-              cause.code === 'SETTINGS_ENCRYPTION_UNAVAILABLE' ||
-              cause.code === 'COVER_STRAIGHTENING_UNAVAILABLE'
-            ? cause.code
-            : 'BAD_REQUEST';
+        typeof cause.code === 'string' && !cause.code.startsWith('SQLITE_')
+          ? cause.code
+          : status === 409
+            ? 'CONFLICT'
+            : status === 401
+              ? 'UNAUTHORIZED'
+              : status === 403
+                ? 'FORBIDDEN'
+                : 'BAD_REQUEST';
       reply.code(status).send(error(code, cause.message, cause.details));
     },
   );
@@ -156,7 +287,63 @@ export async function buildApp() {
     const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, '');
     if (bearer && config.apiToken && safeEqual(bearer, config.apiToken)) {
       (req as any).auth = 'token';
+      (req as any).assistant = {
+        id: 'legacy-api-token',
+        name: 'Legacy API token',
+        scopes: allCredentialScopes,
+        legacy: true,
+      } satisfies AssistantIdentity;
       return;
+    }
+    if (bearer) {
+      const identity = authenticateCredential(bearer);
+      if (identity) {
+        const currentWindow = credentialWindows.get(identity.id);
+        if (!currentWindow || Date.now() - currentWindow.startedAt >= 60_000)
+          credentialWindows.set(identity.id, { startedAt: Date.now(), count: 1 });
+        else if (++currentWindow.count > 120)
+          return reply
+            .code(429)
+            .send(error('RATE_LIMITED', 'Credential request limit exceeded; retry shortly'));
+        (req as any).auth = 'credential';
+        (req as any).assistant = identity;
+        const route = req.routeOptions.url ?? req.url;
+        const method = req.method;
+        if (
+          route.startsWith('/api/v1/settings/') ||
+          route === '/api/v1/export/json' ||
+          route === '/api/v1/export/sqlite' ||
+          route === '/api/v1/import/json' ||
+          route === '/api/v1/import/sqlite'
+        )
+          return reply
+            .code(403)
+            .send(
+              error('INSUFFICIENT_SCOPE', 'Assistant credentials cannot access administration'),
+            );
+        const directRisky =
+          method === 'DELETE' ||
+          route === '/api/v1/imports/:id/approve' ||
+          route === '/api/v1/imports/:id/reject';
+        if (directRisky)
+          return reply
+            .code(403)
+            .send(error('CONFIRMATION_REQUIRED', 'Prepare and execute a confirmation instead'));
+        if (route.startsWith('/api/v1/confirmations') || route === '/api/v1/mcp') return;
+        const required =
+          method === 'GET' || method === 'HEAD' || route === '/api/v1/recommendations'
+            ? 'library:read'
+            : route.includes('reading-session')
+              ? 'reading:write'
+              : route.includes('/imports') || route.includes('/discovery')
+                ? 'imports:write'
+                : 'books:write';
+        if (!hasScope(identity, required))
+          return reply
+            .code(403)
+            .send(error('INSUFFICIENT_SCOPE', `Credential requires the ${required} scope`));
+        return;
+      }
     }
     const token = req.cookies.librarium_session;
     const session = token
@@ -173,20 +360,277 @@ export async function buildApp() {
     )
       return reply.code(403).send(error('CSRF_INVALID', 'Missing or invalid CSRF token'));
   });
+
+  app.addHook('onResponse', async (req, reply) => {
+    const identity = (req as any).assistant as AssistantIdentity | undefined;
+    if (!identity || !req.url.startsWith('/api/v1/')) return;
+    const route = req.routeOptions.url ?? req.url;
+    const targetType = route.includes('/books')
+      ? 'book'
+      : route.includes('/reading-session')
+        ? 'reading_session'
+        : route.includes('/imports')
+          ? 'import'
+          : route.includes('/confirmations')
+            ? 'confirmation'
+            : undefined;
+    audit(
+      identity,
+      `${req.method} ${route}`,
+      reply.statusCode,
+      targetType,
+      (req.params as any)?.id,
+    );
+  });
+
+  app.addHook('preHandler', async (req, reply) => {
+    const identity = (req as any).assistant as AssistantIdentity | undefined;
+    if (!identity || identity.legacy) return;
+    const eligible = new Set([
+      'POST /api/v1/books',
+      'PATCH /api/v1/books/:id',
+      'POST /api/v1/books/:id/reading-sessions',
+      'PATCH /api/v1/reading-sessions/:id',
+      'POST /api/v1/imports/isbn/preview',
+      'POST /api/v1/discovery/search',
+    ]);
+    const route = req.routeOptions.url ?? req.url;
+    const operation = `${req.method} ${route}`;
+    if (!eligible.has(operation)) return;
+    const key = String(req.headers['idempotency-key'] || '');
+    if (!/^[A-Za-z0-9._:-]{8,128}$/.test(key))
+      return reply
+        .code(400)
+        .send(
+          error('IDEMPOTENCY_KEY_REQUIRED', 'Provide an Idempotency-Key of 8–128 safe characters'),
+        );
+    const hash = requestDigest(req.body);
+    const previous = findIdempotentResponse(identity.id, key, req.method, route);
+    if (previous) {
+      if (previous.request_hash !== hash)
+        return reply
+          .code(409)
+          .send(
+            error('IDEMPOTENCY_CONFLICT', 'This key was already used with a different request'),
+          );
+      (req as any).idempotencyReplay = true;
+      return reply.code(previous.response_status).send(JSON.parse(previous.response_body));
+    }
+    (req as any).idempotencyRecord = {
+      credentialId: identity.id,
+      key,
+      method: req.method,
+      path: route,
+      requestHash: hash,
+    };
+  });
+
+  app.addHook('onSend', async (req, reply, payload) => {
+    const record = (req as any).idempotencyRecord;
+    if (!record || (req as any).idempotencyReplay || reply.statusCode >= 500) return payload;
+    const body = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    saveIdempotentResponse({ ...record, status: reply.statusCode, body });
+    return payload;
+  });
   app.get('/api/v1/auth/me', async (req) => ({
     username: (req as any).session?.username ?? config.adminUsername,
     csrfToken: (req as any).session?.csrf_token ?? null,
   }));
 
-  app.get('/api/v1/books', async (req) => listBooks(req.query as any));
-  app.post('/api/v1/books', async (req, reply) =>
-    reply.code(201).send(createBook(BookInput.parse(req.body))),
+  app.get(
+    '/api/v1/library/summary',
+    { schema: { description: 'Compact catalog totals, favorites, and preference signals.' } },
+    async () => librarySummary(),
   );
   app.get(
-    '/api/v1/books/:id',
-    async (req, reply) =>
-      getBook((req.params as any).id) ?? reply.code(404).send(error('NOT_FOUND', 'Book not found')),
+    '/api/v1/library/facets',
+    { schema: { description: 'Available authors, categories, languages, formats, and statuses.' } },
+    async () => libraryFacets(),
   );
+  app.get(
+    '/api/v1/reading-sessions',
+    { schema: { querystring: jsonSchema(ReadingSessionQuery) } },
+    async (req) => {
+      const identity = (req as any).assistant as AssistantIdentity | undefined;
+      return listReadingSessions(req.query, !identity || hasScope(identity, 'notes:read'));
+    },
+  );
+  app.get('/api/v1/imports', async (req) => listImports(req.query));
+  app.post(
+    '/api/v1/imports/isbn/preview',
+    {
+      schema: {
+        body: { type: 'object', required: ['isbn'], properties: { isbn: { type: 'string' } } },
+        response: { 201: { description: 'ISBN review candidate created' } },
+      },
+    },
+    async (req, reply) => {
+      const identity = (req as any).assistant as AssistantIdentity | undefined;
+      if (identity) requireScope(identity, 'imports:write');
+      const result = await createDiscovery({
+        isbn: String((req.body as any)?.isbn || ''),
+        limit: 1,
+      });
+      return reply.code(201).send(result);
+    },
+  );
+  app.post(
+    '/api/v1/discovery/search',
+    {
+      schema: {
+        body: jsonSchema(DiscoveryInput),
+        description: 'Search external metadata providers and create review candidates.',
+        response: { 201: { description: 'Discovery review batch created' } },
+      },
+    },
+    async (req, reply) => {
+      const identity = (req as any).assistant as AssistantIdentity | undefined;
+      if (identity) requireScope(identity, 'imports:write');
+      return reply.code(201).send(await createDiscovery(DiscoveryInput.parse(req.body)));
+    },
+  );
+  app.post(
+    '/api/v1/recommendations',
+    {
+      schema: {
+        body: jsonSchema(RecommendationInput),
+        description: 'Rank owned books locally with optional metadata-only OpenAI reranking.',
+      },
+    },
+    async (req) => {
+      const input = RecommendationInput.parse(req.body);
+      const identity = (req as any).assistant as AssistantIdentity | undefined;
+      if (identity) requireScope(identity, 'library:read');
+      const recommendations = await recommendBooks(input);
+      if (!input.includeExternal || recommendations.results.length >= input.limit || !input.query)
+        return recommendations;
+      if (identity) requireScope(identity, 'imports:write');
+      const discovery = await createDiscovery({
+        query: input.query,
+        limit: input.limit - recommendations.results.length,
+      });
+      const external = discovery!.candidates
+        .filter((candidate: any) => !candidate.duplicate)
+        .slice(0, input.limit - recommendations.results.length)
+        .map((candidate: any) => ({
+          candidateId: candidate.id,
+          book: assistantSafeBook(candidate.metadata),
+          score: candidate.confidence,
+          signals: { externalDiscovery: 1 },
+          reasons: [`Found through ${candidate.metadata?.metadataSource || 'external discovery'}`],
+          source: 'external',
+        }));
+      return {
+        ...recommendations,
+        results: [...recommendations.results, ...external],
+        discoveryImportId: discovery!.id,
+      };
+    },
+  );
+  app.post(
+    '/api/v1/confirmations',
+    {
+      schema: {
+        body: jsonSchema(ConfirmationAction),
+        description: 'Prepare a credential-bound, expiring risky action.',
+        response: {
+          201: { description: 'Confirmation intent prepared' },
+          403: { $ref: 'ApiError#' },
+        },
+      },
+    },
+    async (req, reply) => {
+      const identity = (req as any).assistant as AssistantIdentity | undefined;
+      if (!identity || identity.legacy)
+        return reply
+          .code(403)
+          .send(error('SCOPED_CREDENTIAL_REQUIRED', 'Use a named scoped credential'));
+      return reply.code(201).send(prepareConfirmation(identity, req.body));
+    },
+  );
+  app.post('/api/v1/confirmations/:id/execute', async (req, reply) => {
+    const identity = (req as any).assistant as AssistantIdentity | undefined;
+    if (!identity || identity.legacy)
+      return reply
+        .code(403)
+        .send(error('SCOPED_CREDENTIAL_REQUIRED', 'Use a named scoped credential'));
+    return reply.send(executeConfirmation(identity, (req.params as any).id));
+  });
+  app.post('/api/v1/mcp', async (req, reply) => {
+    const identity = (req as any).assistant as AssistantIdentity | undefined;
+    if (!identity)
+      return reply.code(401).send(error('UNAUTHORIZED', 'Bearer authentication required'));
+    const host = String(req.headers.host || '')
+      .split(':')[0]!
+      .toLowerCase();
+    const origin = req.headers.origin ? new URL(req.headers.origin).hostname.toLowerCase() : null;
+    if (config.mcpAllowedHosts.length && !config.mcpAllowedHosts.includes(host))
+      return reply.code(403).send(error('MCP_HOST_REJECTED', 'MCP host is not allowed'));
+    if (origin && origin !== host && !config.mcpAllowedOrigins.includes(origin))
+      return reply.code(403).send(error('MCP_ORIGIN_REJECTED', 'MCP origin is not allowed'));
+    return handleMcpRequest(req, reply, identity);
+  });
+  app.get('/api/v1/mcp', async (_req, reply) =>
+    reply.code(405).send({
+      jsonrpc: '2.0',
+      error: { code: -32600, message: 'Use POST for stateless MCP' },
+      id: null,
+    }),
+  );
+  app.delete('/api/v1/mcp', async (_req, reply) =>
+    reply.code(405).send({
+      jsonrpc: '2.0',
+      error: { code: -32600, message: 'Sessions are not used' },
+      id: null,
+    }),
+  );
+  app.get('/api/v1/trash/books', async () => ({ items: listTrash() }));
+  app.post('/api/v1/trash/books/:id/restore', async (req, reply) =>
+    restoreBook((req.params as any).id)
+      ? reply.send({ book: getBook((req.params as any).id) })
+      : reply.code(404).send(error('NOT_FOUND', 'Trashed book not found')),
+  );
+  app.delete('/api/v1/trash/books/:id', async (req, reply) =>
+    permanentlyDeleteBook((req.params as any).id)
+      ? reply.code(204).send()
+      : reply.code(404).send(error('NOT_FOUND', 'Trashed book not found')),
+  );
+
+  app.get(
+    '/api/v1/books',
+    {
+      schema: {
+        querystring: jsonSchema(BookQuery),
+        description: 'Search and filter the active catalog.',
+      },
+    },
+    async (req) => {
+      const identity = (req as any).assistant as AssistantIdentity | undefined;
+      const result = listBooks(BookQuery.parse(req.query), {
+        includeNotes: !identity || hasScope(identity, 'notes:read'),
+      });
+      return identity
+        ? { ...result, items: result.items.map((book: any) => assistantSafeBook(book)) }
+        : result;
+    },
+  );
+  app.post(
+    '/api/v1/books',
+    { schema: { body: jsonSchema(BookInput), description: 'Create a catalog book.' } },
+    async (req, reply) => {
+      const identity = (req as any).assistant as AssistantIdentity | undefined;
+      if (identity && (req.body as any)?.notes !== undefined) requireScope(identity, 'notes:write');
+      return reply.code(201).send(createBook(BookInput.parse(req.body)));
+    },
+  );
+  app.get('/api/v1/books/:id', async (req, reply) => {
+    const identity = (req as any).assistant as AssistantIdentity | undefined;
+    const book = getBook((req.params as any).id, {
+      includeNotes: !(req as any).assistant || hasScope((req as any).assistant, 'notes:read'),
+    });
+    if (!book) return reply.code(404).send(error('NOT_FOUND', 'Book not found'));
+    return identity ? assistantSafeBook(book) : book;
+  });
   app.get('/api/v1/books/:id/cover', async (req, reply) => {
     const book = getBook((req.params as any).id);
     if (!book?.localCover) return reply.code(404).send(error('NOT_FOUND', 'Local cover not found'));
@@ -337,9 +781,15 @@ export async function buildApp() {
   });
   app.patch(
     '/api/v1/books/:id',
-    async (req, reply) =>
-      updateBook((req.params as any).id, BookPatch.parse(req.body)) ??
-      reply.code(404).send(error('NOT_FOUND', 'Book not found')),
+    { schema: { body: jsonSchema(BookPatch), description: 'Update fields on a catalog book.' } },
+    async (req, reply) => {
+      const identity = (req as any).assistant as AssistantIdentity | undefined;
+      if (identity && (req.body as any)?.notes !== undefined) requireScope(identity, 'notes:write');
+      return (
+        updateBook((req.params as any).id, BookPatch.parse(req.body)) ??
+        reply.code(404).send(error('NOT_FOUND', 'Book not found'))
+      );
+    },
   );
   app.delete('/api/v1/books/:id', async (req, reply) =>
     deleteBook((req.params as any).id)
@@ -354,7 +804,13 @@ export async function buildApp() {
   );
   app.get('/api/v1/dashboard', async () => {
     const count = (where = '') =>
-      (db.prepare(`SELECT count(*) n FROM books ${where}`).get() as any).n;
+      (
+        db
+          .prepare(
+            `SELECT count(*) n FROM books b ${where ? `${where} AND` : 'WHERE'} NOT EXISTS(SELECT 1 FROM book_trash t WHERE t.book_id=b.id)`,
+          )
+          .get() as any
+      ).n;
     return {
       total: count(),
       reading: count("WHERE reading_status='reading'"),
@@ -429,46 +885,58 @@ export async function buildApp() {
       )
       .all(),
   );
-  app.post('/api/v1/books/:id/reading-sessions', async (req, reply) => {
-    const bookId = (req.params as any).id;
-    if (!getBook(bookId)) return reply.code(404).send(error('NOT_FOUND', 'Book not found'));
-    const body = ReadingSessionInput.parse(req.body),
-      sessionId = id(),
-      timestamp = now();
-    db.prepare(
-      'INSERT INTO reading_sessions(id,book_id,started_date,finished_date,rating,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',
-    ).run(
-      sessionId,
-      bookId,
-      body.startedDate ?? null,
-      body.finishedDate ?? null,
-      body.rating ?? null,
-      body.notes ?? null,
-      timestamp,
-      timestamp,
-    );
-    return reply
-      .code(201)
-      .send(db.prepare('SELECT * FROM reading_sessions WHERE id=?').get(sessionId));
-  });
-  app.patch('/api/v1/reading-sessions/:id', async (req, reply) => {
-    const body = ReadingSessionInput.partial().parse(req.body),
-      current = db
-        .prepare('SELECT * FROM reading_sessions WHERE id=?')
-        .get((req.params as any).id) as any;
-    if (!current) return reply.code(404).send(error('NOT_FOUND', 'Reading session not found'));
-    const next = {
-      ...current,
-      ...body,
-      started_date: body.startedDate ?? current.started_date,
-      finished_date: body.finishedDate ?? current.finished_date,
-      updated_at: now(),
-    };
-    db.prepare(
-      'UPDATE reading_sessions SET started_date=@started_date,finished_date=@finished_date,rating=@rating,notes=@notes,updated_at=@updated_at WHERE id=@id',
-    ).run(next);
-    return db.prepare('SELECT * FROM reading_sessions WHERE id=?').get(current.id);
-  });
+  app.post(
+    '/api/v1/books/:id/reading-sessions',
+    { schema: { body: jsonSchema(ReadingSessionInput) } },
+    async (req, reply) => {
+      const bookId = (req.params as any).id;
+      if (!getBook(bookId)) return reply.code(404).send(error('NOT_FOUND', 'Book not found'));
+      const identity = (req as any).assistant as AssistantIdentity | undefined;
+      if (identity && (req.body as any)?.notes !== undefined) requireScope(identity, 'notes:write');
+      const body = ReadingSessionInput.parse(req.body),
+        sessionId = id(),
+        timestamp = now();
+      db.prepare(
+        'INSERT INTO reading_sessions(id,book_id,started_date,finished_date,rating,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',
+      ).run(
+        sessionId,
+        bookId,
+        body.startedDate ?? null,
+        body.finishedDate ?? null,
+        body.rating ?? null,
+        body.notes ?? null,
+        timestamp,
+        timestamp,
+      );
+      return reply
+        .code(201)
+        .send(db.prepare('SELECT * FROM reading_sessions WHERE id=?').get(sessionId));
+    },
+  );
+  app.patch(
+    '/api/v1/reading-sessions/:id',
+    { schema: { body: jsonSchema(ReadingSessionInput.partial()) } },
+    async (req, reply) => {
+      const identity = (req as any).assistant as AssistantIdentity | undefined;
+      if (identity && (req.body as any)?.notes !== undefined) requireScope(identity, 'notes:write');
+      const body = ReadingSessionInput.partial().parse(req.body),
+        current = db
+          .prepare('SELECT * FROM reading_sessions WHERE id=?')
+          .get((req.params as any).id) as any;
+      if (!current) return reply.code(404).send(error('NOT_FOUND', 'Reading session not found'));
+      const next = {
+        ...current,
+        ...body,
+        started_date: body.startedDate ?? current.started_date,
+        finished_date: body.finishedDate ?? current.finished_date,
+        updated_at: now(),
+      };
+      db.prepare(
+        'UPDATE reading_sessions SET started_date=@started_date,finished_date=@finished_date,rating=@rating,notes=@notes,updated_at=@updated_at WHERE id=@id',
+      ).run(next);
+      return db.prepare('SELECT * FROM reading_sessions WHERE id=?').get(current.id);
+    },
+  );
   app.delete('/api/v1/reading-sessions/:id', async (req, reply) =>
     db.prepare('DELETE FROM reading_sessions WHERE id=?').run((req.params as any).id).changes
       ? reply.code(204).send()
@@ -675,7 +1143,10 @@ export async function buildApp() {
   });
 
   function exportDocument() {
-    const books = listBooks({ limit: 100000 }).items;
+    const first = listBooks({ limit: 100, page: 1 });
+    const books = [...first.items];
+    for (let page = 2; books.length < first.total; page++)
+      books.push(...listBooks({ limit: 100, page }).items);
     return {
       schemaVersion: 1,
       exportedAt: now(),
@@ -815,6 +1286,7 @@ export async function buildApp() {
     } finally {
       await fsp.unlink(temporary).catch(() => {});
     }
+    refreshAllBookSearch();
     return { restored: true, backup: path.basename(backup) };
   });
   app.get('/api/v1/settings/status', async () => ({
@@ -825,8 +1297,79 @@ export async function buildApp() {
       keyConfigured: Boolean(config.openAiKey),
     },
     maxImageSizeMb: config.maxImageMb,
+    recommendations: recommendationConfiguration(),
   }));
   app.put('/api/v1/settings/metadata', async (req) => saveMetadataSettings(req.body));
+  app.put('/api/v1/settings/recommendations', async (req) =>
+    saveRecommendationSettings(RecommendationSettingsInput.parse(req.body)),
+  );
+  app.get('/api/v1/settings/api-credentials', async () => ({
+    items: listCredentials(),
+    availableScopes: allCredentialScopes,
+  }));
+  app.post('/api/v1/settings/api-credentials', async (req, reply) => {
+    const credential = createCredential(ApiCredentialInput.parse(req.body));
+    audit(undefined, 'CREATE API CREDENTIAL', 201, 'api_credential', credential.id);
+    return reply.code(201).send(credential);
+  });
+  app.delete('/api/v1/settings/api-credentials/:id', async (req, reply) => {
+    const credentialId = (req.params as any).id;
+    if (!revokeCredential(credentialId))
+      return reply.code(404).send(error('NOT_FOUND', 'Credential not found or already revoked'));
+    audit(undefined, 'REVOKE API CREDENTIAL', 204, 'api_credential', credentialId);
+    return reply.code(204).send();
+  });
+  app.get('/api/v1/settings/audit-events', async (req) => {
+    const query = req.query as any;
+    return listAuditEvents(Number(query?.page), Number(query?.limit));
+  });
+
+  app.get('/api/docs/assistant.json', async () => {
+    const document = structuredClone(app.swagger()) as any;
+    document.info = {
+      ...document.info,
+      title: 'Librarium Assistant API',
+      description:
+        'Curated catalog, reading, recommendation, discovery, and confirmed-write operations for private assistants.',
+    };
+    const allowed = [
+      '/api/v1/health',
+      '/api/v1/books',
+      '/api/v1/library/',
+      '/api/v1/reading-sessions',
+      '/api/v1/recommendations',
+      '/api/v1/discovery/',
+      '/api/v1/imports',
+      '/api/v1/confirmations',
+      '/api/v1/trash/',
+    ];
+    for (const route of Object.keys(document.paths)) {
+      if (!allowed.some((prefix) => route === prefix || route.startsWith(prefix))) {
+        delete document.paths[route];
+        continue;
+      }
+      if (route === '/api/v1/books/{id}') delete document.paths[route].delete;
+      if (
+        route.includes('/cover') ||
+        route.includes('/enrich') ||
+        route.includes('/images/') ||
+        route.endsWith('/images') ||
+        route === '/api/v1/imports/isbn' ||
+        route === '/api/v1/imports/isbn/bulk'
+      )
+        delete document.paths[route];
+      if (route.endsWith('/approve') || route.endsWith('/reject')) delete document.paths[route];
+      if (route === '/api/v1/trash/books/{id}') delete document.paths[route].delete;
+    }
+    return document;
+  });
+  app.get('/api/assistant-docs', async (_req, reply) =>
+    reply
+      .type('text/html')
+      .send(
+        `<!doctype html><html><head><meta charset="utf-8"><title>Librarium Assistant API</title><link rel="stylesheet" href="/api/docs/static/swagger-ui.css"></head><body><div id="swagger-ui"></div><script src="/api/docs/static/swagger-ui-bundle.js"></script><script>SwaggerUIBundle({url:'/api/docs/assistant.json',dom_id:'#swagger-ui',deepLinking:true})</script></body></html>`,
+      ),
+  );
 
   const publicDir = path.resolve('dist/public');
   if (fs.existsSync(publicDir)) {

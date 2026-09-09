@@ -1,9 +1,9 @@
-import { BookInputType, parseIsbn } from '@librarium/shared';
+import { BookInputType, BookQuery, BookQueryType, parseIsbn } from '@librarium/shared';
 import { db, id, now } from './db.js';
 
 type Row = Record<string, any>;
 
-function hydrate(row: Row) {
+function hydrate(row: Row, options: { summary?: boolean; includeNotes?: boolean } = {}): any {
   const authors = db
     .prepare(
       'SELECT a.name FROM authors a JOIN book_authors ba ON a.id=ba.author_id WHERE ba.book_id=? ORDER BY ba.position',
@@ -14,7 +14,7 @@ function hydrate(row: Row) {
       'SELECT c.name FROM categories c JOIN book_categories bc ON c.id=bc.category_id WHERE bc.book_id=? ORDER BY c.name',
     )
     .all(row.id) as Row[];
-  return {
+  const book = {
     id: row.id,
     isbn10: row.isbn10,
     isbn13: row.isbn13,
@@ -29,11 +29,12 @@ function hydrate(row: Row) {
     categories: categories.map((x) => x.name),
     coverUrl: row.cover_url,
     localCover: row.local_cover,
+    coverAvailable: Boolean(row.local_cover || row.cover_url),
     editionFormat: row.edition_format,
     ownershipStatus: row.ownership_status,
     readingStatus: row.reading_status,
     rating: row.rating,
-    notes: row.notes,
+    notes: options.includeNotes === false ? undefined : row.notes,
     metadataSource: row.metadata_source,
     metadataSourceId: row.metadata_source_id,
     dateAdded: row.created_at,
@@ -44,6 +45,77 @@ function hydrate(row: Row) {
       )
       .all(row.id),
   };
+  if (!options.summary) return book;
+  return {
+    id: book.id,
+    isbn10: book.isbn10,
+    isbn13: book.isbn13,
+    title: book.title,
+    subtitle: book.subtitle,
+    authors: book.authors,
+    publicationDate: book.publicationDate,
+    language: book.language,
+    pageCount: book.pageCount,
+    categories: book.categories,
+    editionFormat: book.editionFormat,
+    ownershipStatus: book.ownershipStatus,
+    readingStatus: book.readingStatus,
+    rating: book.rating,
+    coverAvailable: book.coverAvailable,
+    dateAdded: book.dateAdded,
+    dateUpdated: book.dateUpdated,
+  };
+}
+
+export function refreshBookSearch(bookId: string) {
+  const row = db.prepare('SELECT * FROM books WHERE id=?').get(bookId) as Row | undefined;
+  if (!row) {
+    db.prepare('DELETE FROM book_search_documents WHERE book_id=?').run(bookId);
+    db.prepare('DELETE FROM book_search_fts WHERE book_id=?').run(bookId);
+    return;
+  }
+  const authors = (
+    db
+      .prepare(
+        'SELECT a.name FROM authors a JOIN book_authors ba ON a.id=ba.author_id WHERE ba.book_id=? ORDER BY ba.position',
+      )
+      .all(bookId) as Row[]
+  ).map((entry) => entry.name);
+  const categories = (
+    db
+      .prepare(
+        'SELECT c.name FROM categories c JOIN book_categories bc ON c.id=bc.category_id WHERE bc.book_id=? ORDER BY c.name',
+      )
+      .all(bookId) as Row[]
+  ).map((entry) => entry.name);
+  const document = {
+    bookId,
+    title: row.title,
+    subtitle: row.subtitle ?? '',
+    authors: authors.join(' '),
+    publisher: row.publisher ?? '',
+    description: row.description ?? '',
+    categories: categories.join(' '),
+    isbn: [row.isbn10, row.isbn13].filter(Boolean).join(' '),
+    notes: row.notes ?? '',
+  };
+  db.prepare('DELETE FROM book_search_documents WHERE book_id=?').run(bookId);
+  db.prepare('DELETE FROM book_search_fts WHERE book_id=?').run(bookId);
+  db.prepare(
+    'INSERT INTO book_search_documents(book_id,title,subtitle,authors,publisher,description,categories,isbn,notes) VALUES(@bookId,@title,@subtitle,@authors,@publisher,@description,@categories,@isbn,@notes)',
+  ).run(document);
+  db.prepare(
+    'INSERT INTO book_search_fts(book_id,title,subtitle,authors,publisher,description,categories,isbn,notes) VALUES(@bookId,@title,@subtitle,@authors,@publisher,@description,@categories,@isbn,@notes)',
+  ).run(document);
+}
+
+export function refreshAllBookSearch() {
+  db.transaction(() => {
+    db.prepare('DELETE FROM book_search_fts').run();
+    db.prepare('DELETE FROM book_search_documents').run();
+    const bookIds = db.prepare('SELECT id FROM books').all() as { id: string }[];
+    bookIds.forEach(({ id: bookId }) => refreshBookSearch(bookId));
+  })();
 }
 
 function setRelations(bookId: string, authors: string[], categories: string[]) {
@@ -73,15 +145,28 @@ function setRelations(bookId: string, authors: string[], categories: string[]) {
   });
 }
 
-export function getBook(bookId: string) {
-  const row = db.prepare('SELECT * FROM books WHERE id=?').get(bookId) as Row | undefined;
-  return row ? hydrate(row) : null;
+export function getBook(
+  bookId: string,
+  options: { includeTrashed?: boolean; includeNotes?: boolean; summary?: boolean } = {},
+): any {
+  const row = db
+    .prepare(
+      `SELECT b.* FROM books b WHERE b.id=? ${
+        options.includeTrashed
+          ? ''
+          : 'AND NOT EXISTS(SELECT 1 FROM book_trash t WHERE t.book_id=b.id)'
+      }`,
+    )
+    .get(bookId) as Row | undefined;
+  return row ? hydrate(row, options) : null;
 }
 
 export function findBookByIsbn(isbn: string) {
   const parsed = parseIsbn(isbn);
   const row = db
-    .prepare('SELECT * FROM books WHERE isbn13=? OR isbn10=?')
+    .prepare(
+      'SELECT b.* FROM books b WHERE (isbn13=? OR isbn10=?) AND NOT EXISTS(SELECT 1 FROM book_trash t WHERE t.book_id=b.id)',
+    )
     .get(parsed.isbn13, parsed.isbn10) as Row | undefined;
   return row ? hydrate(row) : null;
 }
@@ -116,6 +201,7 @@ export function createBook(input: BookInputType) {
       VALUES (@id,@isbn10,@isbn13,@title,@subtitle,@publisher,@publicationDate,@language,@pageCount,@description,@coverUrl,@editionFormat,@ownershipStatus,@readingStatus,@rating,@notes,@metadataSource,@metadataSourceId,@created,@updated)`,
     ).run({ ...data, id: bookId, isbn10, isbn13, created: timestamp, updated: timestamp });
     setRelations(bookId, data.authors, data.categories);
+    refreshBookSearch(bookId);
     return getBook(bookId)!;
   })();
 }
@@ -133,6 +219,7 @@ export function updateBook(bookId: string, patch: Record<string, any>) {
       rating=@rating,notes=@notes,metadata_source=@metadataSource,metadata_source_id=@metadataSourceId,updated_at=@updated WHERE id=@id`,
     ).run({ ...book, updated: now() });
     setRelations(bookId, book.authors, book.categories);
+    refreshBookSearch(bookId);
     return getBook(bookId);
   })();
 }
@@ -145,32 +232,121 @@ export function setBookLocalCover(bookId: string, localCover: string | null) {
 }
 
 export const deleteBook = (bookId: string) =>
-  db.prepare('DELETE FROM books WHERE id=?').run(bookId).changes > 0;
+  db
+    .prepare(
+      'INSERT OR IGNORE INTO book_trash(book_id,deleted_at) SELECT id,? FROM books WHERE id=?',
+    )
+    .run(now(), bookId).changes > 0;
 
-export function listBooks(query: Record<string, any>) {
+export const restoreBook = (bookId: string) =>
+  db.prepare('DELETE FROM book_trash WHERE book_id=?').run(bookId).changes > 0;
+
+export const permanentlyDeleteBook = (bookId: string) => {
+  const deleted =
+    db
+      .prepare('DELETE FROM books WHERE id=? AND EXISTS(SELECT 1 FROM book_trash WHERE book_id=?)')
+      .run(bookId, bookId).changes > 0;
+  if (deleted) refreshBookSearch(bookId);
+  return deleted;
+};
+
+export function listTrash() {
+  return (
+    db
+      .prepare(
+        'SELECT b.*,t.deleted_at FROM books b JOIN book_trash t ON t.book_id=b.id ORDER BY t.deleted_at DESC',
+      )
+      .all() as Row[]
+  ).map((row) => ({ ...hydrate(row, { summary: true }), deletedAt: row.deleted_at }));
+}
+
+export function listBooks(rawQuery: Record<string, any>, options: { includeNotes?: boolean } = {}) {
+  const query = BookQuery.parse(rawQuery) as BookQueryType;
   const clauses: string[] = [],
     args: unknown[] = [];
+  let searchJoin = '';
   if (query.search) {
-    clauses.push(
-      '(b.title LIKE ? OR b.isbn10 LIKE ? OR b.isbn13 LIKE ? OR EXISTS(SELECT 1 FROM book_authors ba JOIN authors a ON a.id=ba.author_id WHERE ba.book_id=b.id AND a.name LIKE ?))',
-    );
-    args.push(...Array(4).fill(`%${query.search}%`));
-  }
-  for (const [key, column] of [
-    ['readingStatus', 'reading_status'],
-    ['ownershipStatus', 'ownership_status'],
-  ] as const) {
-    if (query[key]) {
-      clauses.push(`b.${column}=?`);
-      args.push(query[key]);
+    const terms = query.search.match(/[\p{L}\p{N}]+/gu)?.slice(0, 20) ?? [];
+    if (terms.length) {
+      const columns = [
+        'title',
+        'subtitle',
+        'authors',
+        'publisher',
+        'description',
+        'categories',
+        'isbn',
+        ...(options.includeNotes ? ['notes'] : []),
+      ];
+      const match = terms
+        .map(
+          (term) =>
+            `(${columns.map((column) => `${column}:"${term.replaceAll('"', '""')}"*`).join(' OR ')})`,
+        )
+        .join(' AND ');
+      searchJoin =
+        'JOIN (SELECT book_id,bm25(book_search_fts) relevance FROM book_search_fts WHERE book_search_fts MATCH ?) search_match ON search_match.book_id=b.id';
+      args.push(match);
     }
   }
-  if (query.category) {
-    clauses.push(
-      'EXISTS(SELECT 1 FROM book_categories bc JOIN categories c ON c.id=bc.category_id WHERE bc.book_id=b.id AND c.name=?)',
-    );
-    args.push(query.category);
+  for (const [values, column] of [
+    [query.readingStatus, 'reading_status'],
+    [query.ownershipStatus, 'ownership_status'],
+    [query.language, 'language'],
+    [query.editionFormat, 'edition_format'],
+  ] as const) {
+    if (values?.length) {
+      clauses.push(`b.${column} IN (${values.map(() => '?').join(',')})`);
+      args.push(...values);
+    }
   }
+  if (query.author) {
+    clauses.push(
+      'EXISTS(SELECT 1 FROM book_authors ba JOIN authors a ON a.id=ba.author_id WHERE ba.book_id=b.id AND a.name LIKE ?)',
+    );
+    args.push(`%${query.author}%`);
+  }
+  const categories = [...(query.categories ?? []), ...(query.category ? [query.category] : [])];
+  if (categories.length) {
+    clauses.push(
+      `b.id IN (SELECT bc.book_id FROM book_categories bc JOIN categories c ON c.id=bc.category_id WHERE c.name IN (${categories
+        .map(() => '?')
+        .join(
+          ',',
+        )}) GROUP BY bc.book_id ${query.categoryMode === 'all' ? 'HAVING count(DISTINCT lower(c.name))=?' : ''})`,
+    );
+    args.push(
+      ...categories,
+      ...(query.categoryMode === 'all'
+        ? [new Set(categories.map((x) => x.toLowerCase())).size]
+        : []),
+    );
+  }
+  for (const [value, operator, column] of [
+    [query.ratingMin, '>=', 'rating'],
+    [query.ratingMax, '<=', 'rating'],
+    [query.pageCountMin, '>=', 'page_count'],
+    [query.pageCountMax, '<=', 'page_count'],
+    [query.publishedFrom, '>=', 'publication_date'],
+    [query.publishedTo, '<=', 'publication_date'],
+    [query.addedAfter, '>=', 'created_at'],
+    [query.updatedAfter, '>=', 'updated_at'],
+  ] as const)
+    if (value !== undefined) {
+      clauses.push(`b.${column}${operator}?`);
+      args.push(value);
+    }
+  for (const [value, column] of [
+    [query.hasNotes, 'notes'],
+    [query.hasDescription, 'description'],
+    [query.hasLocalCover, 'local_cover'],
+  ] as const)
+    if (value !== undefined) clauses.push(`b.${column} IS ${value ? 'NOT ' : ''}NULL`);
+  if (query.excludeIds?.length) {
+    clauses.push(`b.id NOT IN (${query.excludeIds.map(() => '?').join(',')})`);
+    args.push(...query.excludeIds);
+  }
+  clauses.push('NOT EXISTS(SELECT 1 FROM book_trash t WHERE t.book_id=b.id)');
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const sorts: Record<string, string> = {
     title: 'title',
@@ -178,14 +354,75 @@ export function listBooks(query: Record<string, any>) {
     dateUpdated: 'updated_at',
     rating: 'rating',
   };
-  const sort = sorts[query.sort] ?? 'created_at',
+  const sort = sorts[query.sort ?? ''] ?? 'created_at',
     order = query.order === 'asc' ? 'ASC' : 'DESC';
-  const page = Math.max(1, Number(query.page) || 1),
-    limit = Math.min(100, Math.max(1, Number(query.limit) || 24));
-  const total = (db.prepare(`SELECT count(*) count FROM books b ${where}`).get(...args) as Row)
-    .count;
+  const page = query.page,
+    limit = query.limit;
+  const total = (
+    db.prepare(`SELECT count(*) count FROM books b ${searchJoin} ${where}`).get(...args) as Row
+  ).count;
+  const orderBy =
+    query.search && (query.sort === 'relevance' || !query.sort)
+      ? 'search_match.relevance ASC'
+      : `b.${sort} ${order}`;
   const rows = db
-    .prepare(`SELECT b.* FROM books b ${where} ORDER BY b.${sort} ${order} LIMIT ? OFFSET ?`)
+    .prepare(`SELECT b.* FROM books b ${searchJoin} ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`)
     .all(...args, limit, (page - 1) * limit) as Row[];
-  return { items: rows.map(hydrate), page, limit, total };
+  return {
+    items: rows.map((row) =>
+      hydrate(row, { summary: query.view === 'summary', includeNotes: options.includeNotes }),
+    ),
+    page,
+    limit,
+    total,
+  };
+}
+
+export function libraryFacets() {
+  const counts = (table: string, name: string, join: string) =>
+    db
+      .prepare(
+        `SELECT ${name} value,count(*) count FROM ${table} ${join} WHERE NOT EXISTS(SELECT 1 FROM book_trash t WHERE t.book_id=b.id) GROUP BY ${name} ORDER BY count DESC,${name}`,
+      )
+      .all();
+  return {
+    authors: counts(
+      'books b',
+      'a.name',
+      'JOIN book_authors ba ON ba.book_id=b.id JOIN authors a ON a.id=ba.author_id',
+    ),
+    categories: counts(
+      'books b',
+      'c.name',
+      'JOIN book_categories bc ON bc.book_id=b.id JOIN categories c ON c.id=bc.category_id',
+    ),
+    languages: counts('books b', 'b.language', '').filter((entry: any) => entry.value),
+    editionFormats: counts('books b', 'b.edition_format', '').filter((entry: any) => entry.value),
+    readingStatuses: counts('books b', 'b.reading_status', ''),
+    ownershipStatuses: counts('books b', 'b.ownership_status', ''),
+  };
+}
+
+export function librarySummary() {
+  const active = 'NOT EXISTS(SELECT 1 FROM book_trash t WHERE t.book_id=b.id)';
+  const statusCounts = (column: string) =>
+    Object.fromEntries(
+      (
+        db
+          .prepare(
+            `SELECT ${column} value,count(*) count FROM books b WHERE ${active} GROUP BY ${column}`,
+          )
+          .all() as Row[]
+      ).map((entry) => [entry.value, entry.count]),
+    );
+  return {
+    total: (db.prepare(`SELECT count(*) count FROM books b WHERE ${active}`).get() as Row).count,
+    trashed: (db.prepare('SELECT count(*) count FROM book_trash').get() as Row).count,
+    readingStatuses: statusCounts('reading_status'),
+    ownershipStatuses: statusCounts('ownership_status'),
+    recent: listBooks({ limit: 6, view: 'summary' }).items,
+    favorites: listBooks({ limit: 6, sort: 'rating', order: 'desc', ratingMin: 4, view: 'summary' })
+      .items,
+    facets: libraryFacets(),
+  };
 }

@@ -6,7 +6,7 @@ import { db, id, now } from './db.js';
 const app = await buildApp();
 beforeEach(() => {
   db.exec(
-    'DELETE FROM cover_drafts; DELETE FROM reading_sessions; DELETE FROM import_candidates; DELETE FROM import_images; DELETE FROM import_batches; DELETE FROM book_authors; DELETE FROM book_categories; DELETE FROM books; DELETE FROM authors; DELETE FROM categories; DELETE FROM sessions;',
+    'DELETE FROM confirmation_intents; DELETE FROM idempotency_records; DELETE FROM audit_events; DELETE FROM api_credentials; DELETE FROM cover_drafts; DELETE FROM reading_sessions; DELETE FROM import_candidates; DELETE FROM import_images; DELETE FROM import_batches; DELETE FROM book_authors; DELETE FROM book_categories; DELETE FROM book_trash; DELETE FROM books; DELETE FROM book_search_fts; DELETE FROM book_search_documents; DELETE FROM authors; DELETE FROM categories; DELETE FROM sessions;',
   );
 });
 afterAll(() => app.close());
@@ -223,5 +223,107 @@ describe('API', () => {
       authors: ['A Visible Author'],
       metadataSource: 'image-analysis',
     });
+  });
+  it('supports scoped assistant search, idempotency, recommendations, and confirmed trash', async () => {
+    const credentialResponse = await app.inject({
+      method: 'POST',
+      url: '/api/v1/settings/api-credentials',
+      headers: bearer,
+      payload: {
+        name: 'Test assistant',
+        scopes: ['library:read', 'books:write', 'books:delete'],
+      },
+    });
+    expect(credentialResponse.statusCode).toBe(201);
+    const token = credentialResponse.json().token;
+    const assistant = { authorization: `Bearer ${token}`, 'idempotency-key': 'create-dune-001' };
+    const payload = {
+      title: 'Dune',
+      authors: ['Frank Herbert'],
+      description: 'A desert planet and political struggle',
+      categories: ['Science Fiction'],
+      rating: 5,
+    };
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/v1/books',
+      headers: assistant,
+      payload,
+    });
+    expect(created.statusCode).toBe(201);
+    const replay = await app.inject({
+      method: 'POST',
+      url: '/api/v1/books',
+      headers: assistant,
+      payload,
+    });
+    expect(replay.json().id).toBe(created.json().id);
+    const search = await app.inject({
+      url: '/api/v1/books?search=desert&categories=Science%20Fiction&view=summary',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(search.json().items[0]).toMatchObject({ title: 'Dune', coverAvailable: false });
+    const recommendations = await app.inject({
+      method: 'POST',
+      url: '/api/v1/recommendations',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { query: 'desert', limit: 3 },
+    });
+    expect(recommendations.json().results[0].book.title).toBe('Dune');
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url: `/api/v1/books/${created.json().id}`,
+          headers: { authorization: `Bearer ${token}` },
+        })
+      ).json().error.code,
+    ).toBe('CONFIRMATION_REQUIRED');
+    const prepared = await app.inject({
+      method: 'POST',
+      url: '/api/v1/confirmations',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { type: 'deleteBook', bookId: created.json().id },
+    });
+    const executed = await app.inject({
+      method: 'POST',
+      url: `/api/v1/confirmations/${prepared.json().id}/execute`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(executed.json().result.deleted).toBe(true);
+    expect(
+      (
+        await app.inject({ url: '/api/v1/books', headers: { authorization: `Bearer ${token}` } })
+      ).json().total,
+    ).toBe(0);
+  });
+  it('publishes curated OpenAPI and scope-filtered MCP tools', async () => {
+    const specification = (await app.inject({ url: '/api/docs/assistant.json' })).json();
+    expect(specification.paths['/api/v1/recommendations'].post.operationId).toBeTruthy();
+    expect(specification.paths['/api/v1/import/sqlite']).toBeUndefined();
+    const credential = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/settings/api-credentials',
+        headers: bearer,
+        payload: { name: 'Reader', scopes: ['library:read'] },
+      })
+    ).json();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/mcp',
+      headers: {
+        authorization: `Bearer ${credential.token}`,
+        accept: 'application/json, text/event-stream',
+      },
+      payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.body.startsWith('event:')
+      ? JSON.parse(response.body.split('\ndata: ')[1]!.trim())
+      : response.json();
+    const names = body.result.tools.map((tool: any) => tool.name);
+    expect(names).toContain('search_books');
+    expect(names).not.toContain('create_book');
   });
 });

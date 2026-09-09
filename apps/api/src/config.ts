@@ -22,13 +22,29 @@ export const config = {
   apiToken: process.env.API_TOKEN || '',
   openAiKey: process.env.OPENAI_API_KEY || '',
   visionModel: process.env.OPENAI_VISION_MODEL || 'gpt-5-mini',
-  metadataModel: process.env.OPENAI_METADATA_MODEL || process.env.OPENAI_VISION_MODEL || 'gpt-5-mini',
+  metadataModel:
+    process.env.OPENAI_METADATA_MODEL || process.env.OPENAI_VISION_MODEL || 'gpt-5-mini',
+  recommendationModel:
+    process.env.OPENAI_RECOMMENDATION_MODEL ||
+    process.env.OPENAI_METADATA_MODEL ||
+    process.env.OPENAI_VISION_MODEL ||
+    'gpt-5-mini',
   visionEnabled: process.env.OPENAI_IMAGE_ANALYSIS_ENABLED !== 'false',
   openLibraryContact: process.env.OPENLIBRARY_CONTACT_EMAIL || '',
-  metadataProviders: configuredProviders(process.env.METADATA_PROVIDERS || process.env.METADATA_PROVIDER),
+  metadataProviders: configuredProviders(
+    process.env.METADATA_PROVIDERS || process.env.METADATA_PROVIDER,
+  ),
   googleBooksApiKey: process.env.GOOGLE_BOOKS_API_KEY || '',
   settingsEncryptionKey: process.env.SETTINGS_ENCRYPTION_KEY || '',
   maxImageMb: Number(process.env.MAX_IMAGE_SIZE_MB || 15),
+  mcpAllowedHosts: (process.env.MCP_ALLOWED_HOSTS || '')
+    .split(',')
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean),
+  mcpAllowedOrigins: (process.env.MCP_ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean),
   nodeEnv: process.env.NODE_ENV || 'development',
   cookieSecure: process.env.COOKIE_SECURE === 'true',
 };

@@ -84,6 +84,7 @@ export const OpenAiMetadataResult = z.object({
   isbn13: z.string().nullable(),
   editionFormat: z.string().max(100).nullable(),
 });
+export const OpenAiDiscoveryResult = z.object({ books: z.array(OpenAiMetadataResult).max(10) });
 
 export const CoverCornersInput = z.object({
   corners: z
@@ -93,3 +94,121 @@ export const CoverCornersInput = z.object({
 export const CoverDraftConfirmInput = CoverCornersInput;
 
 export type ApiError = { error: { code: string; message: string; details?: unknown } };
+
+export const apiCredentialScopes = [
+  'library:read',
+  'notes:read',
+  'notes:write',
+  'books:write',
+  'reading:write',
+  'imports:write',
+  'books:delete',
+] as const;
+export const ApiCredentialScope = z.enum(apiCredentialScopes);
+export type ApiCredentialScopeType = z.infer<typeof ApiCredentialScope>;
+
+const optionalBooleanQuery = z
+  .union([z.boolean(), z.enum(['true', 'false'])])
+  .transform((value) => value === true || value === 'true')
+  .optional();
+const stringListQuery = z
+  .union([z.string(), z.array(z.string())])
+  .transform((value) => (Array.isArray(value) ? value : value.split(',')).filter(Boolean))
+  .optional();
+
+export const BookQuery = z.object({
+  search: z.string().trim().max(500).optional(),
+  author: z.string().trim().max(200).optional(),
+  readingStatus: stringListQuery,
+  ownershipStatus: stringListQuery,
+  category: z.string().trim().max(100).optional(),
+  categories: stringListQuery,
+  categoryMode: z.enum(['any', 'all']).default('any'),
+  language: stringListQuery,
+  editionFormat: stringListQuery,
+  ratingMin: z.coerce.number().int().min(1).max(5).optional(),
+  ratingMax: z.coerce.number().int().min(1).max(5).optional(),
+  pageCountMin: z.coerce.number().int().positive().optional(),
+  pageCountMax: z.coerce.number().int().positive().optional(),
+  publishedFrom: z.string().max(32).optional(),
+  publishedTo: z.string().max(32).optional(),
+  addedAfter: z.string().datetime().optional(),
+  updatedAfter: z.string().datetime().optional(),
+  hasNotes: optionalBooleanQuery,
+  hasDescription: optionalBooleanQuery,
+  hasLocalCover: optionalBooleanQuery,
+  excludeIds: stringListQuery,
+  sort: z.enum(['title', 'dateAdded', 'dateUpdated', 'rating', 'relevance']).optional(),
+  order: z.enum(['asc', 'desc']).optional(),
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(24),
+  view: z.enum(['summary', 'full']).default('full'),
+});
+export type BookQueryType = z.infer<typeof BookQuery>;
+
+export const ReadingSessionQuery = z.object({
+  bookId: z.string().uuid().optional(),
+  author: z.string().trim().max(200).optional(),
+  category: z.string().trim().max(100).optional(),
+  ratingMin: z.coerce.number().int().min(1).max(5).optional(),
+  startedAfter: z.string().max(32).optional(),
+  finishedAfter: z.string().max(32).optional(),
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(24),
+});
+
+export const RecommendationInput = z.object({
+  query: z.string().trim().max(1000).default(''),
+  filters: BookQuery.omit({
+    search: true,
+    sort: true,
+    order: true,
+    page: true,
+    limit: true,
+  }).default({
+    categoryMode: 'any',
+    view: 'full',
+  }),
+  limit: z.number().int().min(1).max(20).default(5),
+  excludeIds: z.array(z.string().uuid()).max(100).default([]),
+  includeExternal: z.boolean().default(false),
+  rerank: z.enum(['local', 'openai']).default('local'),
+});
+
+export const DiscoveryInput = z
+  .object({
+    query: z.string().trim().min(1).max(500).optional(),
+    author: z.string().trim().max(200).optional(),
+    isbn: z.string().trim().max(32).optional(),
+    limit: z.number().int().min(1).max(20).default(10),
+  })
+  .refine((value) => Boolean(value.query || value.isbn), 'Provide query or isbn');
+
+export const ApiCredentialInput = z.object({
+  name: z.string().trim().min(1).max(100),
+  scopes: z.array(ApiCredentialScope).min(1).max(apiCredentialScopes.length),
+  expiresAt: z.string().datetime().nullable().optional(),
+});
+
+export const RecommendationSettingsInput = z.object({
+  openAiRerankingEnabled: z.boolean(),
+});
+
+export const ConfirmationAction = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('deleteBook'), bookId: z.string().uuid() }),
+  z.object({ type: z.literal('permanentlyDeleteBook'), bookId: z.string().uuid() }),
+  z.object({ type: z.literal('restoreBook'), bookId: z.string().uuid() }),
+  z.object({
+    type: z.literal('approveImport'),
+    importId: z.string().uuid(),
+    candidateIds: z.array(z.string().uuid()).min(1),
+    editions: z.record(z.string(), z.unknown()).default({}),
+  }),
+  z.object({
+    type: z.literal('bulkUpdateBooks'),
+    bookIds: z.array(z.string().uuid()).min(1).max(100),
+    patch: BookPatch,
+  }),
+  z.object({ type: z.literal('deleteReadingSession'), sessionId: z.string().uuid() }),
+]);
+export type ConfirmationActionType = z.infer<typeof ConfirmationAction>;

@@ -1018,11 +1018,53 @@ function Review() {
 
 function Settings() {
   const query = useQuery({ queryKey: ['settings'], queryFn: () => api<any>('/settings/status') });
+  const credentials = useQuery({
+    queryKey: ['api-credentials'],
+    queryFn: () => api<any>('/settings/api-credentials'),
+  });
+  const audit = useQuery({
+    queryKey: ['audit-events'],
+    queryFn: () => api<any>('/settings/audit-events?limit=20'),
+  });
+  const trash = useQuery({ queryKey: ['trash'], queryFn: () => api<any>('/trash/books') });
   const [message, setMessage] = useState('');
+  const [newToken, setNewToken] = useState('');
   const metadataSettings = useMutation({
     mutationFn: (payload: unknown) =>
       api<any>('/settings/metadata', { method: 'PUT', body: JSON.stringify(payload) }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['settings'] }),
+  });
+  const createApiCredential = useMutation({
+    mutationFn: (payload: unknown) =>
+      api<any>('/settings/api-credentials', { method: 'POST', body: JSON.stringify(payload) }),
+    onSuccess: (result) => {
+      setNewToken(result.token);
+      void credentials.refetch();
+    },
+  });
+  const revokeApiCredential = useMutation({
+    mutationFn: (credentialId: string) =>
+      api(`/settings/api-credentials/${credentialId}`, { method: 'DELETE' }),
+    onSuccess: () => void credentials.refetch(),
+  });
+  const recommendationSettings = useMutation({
+    mutationFn: (enabled: boolean) =>
+      api('/settings/recommendations', {
+        method: 'PUT',
+        body: JSON.stringify({ openAiRerankingEnabled: enabled }),
+      }),
+    onSuccess: () => void query.refetch(),
+  });
+  const restoreTrash = useMutation({
+    mutationFn: (bookId: string) => api(`/trash/books/${bookId}/restore`, { method: 'POST' }),
+    onSuccess: () => {
+      void trash.refetch();
+      void queryClient.invalidateQueries({ queryKey: ['books'] });
+    },
+  });
+  const permanentlyDeleteTrash = useMutation({
+    mutationFn: (bookId: string) => api(`/trash/books/${bookId}`, { method: 'DELETE' }),
+    onSuccess: () => void trash.refetch(),
   });
   async function jsonImport(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1056,6 +1098,17 @@ function Settings() {
         clearGoogleBooksApiKey: form.get('clearGoogleBooksApiKey') === 'on',
       });
       setMessage('Metadata settings saved.');
+      event.currentTarget.reset();
+    } catch (error) {
+      setMessage((error as Error).message);
+    }
+  }
+  async function createToken(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const scopes = form.getAll('scopes').map(String);
+    try {
+      await createApiCredential.mutateAsync({ name: String(form.get('name')), scopes });
       event.currentTarget.reset();
     } catch (error) {
       setMessage((error as Error).message);
@@ -1134,6 +1187,113 @@ function Settings() {
             {metadataSettings.isPending ? 'Saving…' : 'Save metadata settings'}
           </button>
         </form>
+        <section className="panel">
+          <h2>Recommendation privacy</h2>
+          <p>
+            Local ranking is always available. Optional OpenAI reranking sends book metadata and
+            ratings, never notes, reading-session text, credentials, or images.
+          </p>
+          <label>
+            <input
+              type="checkbox"
+              checked={Boolean(query.data?.recommendations.openAiRerankingEnabled)}
+              disabled={
+                !query.data?.recommendations.openAiConfigured || recommendationSettings.isPending
+              }
+              onChange={(event) => recommendationSettings.mutate(event.target.checked)}
+            />{' '}
+            Enable OpenAI reranking ({query.data?.recommendations.model || 'not configured'})
+          </label>
+        </section>
+        <form className="panel" onSubmit={createToken}>
+          <h2>Assistant credentials</h2>
+          <label>
+            Name
+            <input name="name" placeholder="Private assistant" required maxLength={100} />
+          </label>
+          {[
+            'library:read',
+            'books:write',
+            'reading:write',
+            'imports:write',
+            'books:delete',
+            'notes:read',
+            'notes:write',
+          ].map((scope) => (
+            <label key={scope}>
+              <input
+                type="checkbox"
+                name="scopes"
+                value={scope}
+                defaultChecked={!scope.startsWith('notes:')}
+              />{' '}
+              {scope}
+            </label>
+          ))}
+          <button disabled={createApiCredential.isPending}>Create credential</button>
+          {newToken && (
+            <div role="status">
+              <strong>Copy this token now; it will not be shown again.</strong>
+              <pre>{newToken}</pre>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => navigator.clipboard.writeText(newToken)}
+              >
+                Copy token
+              </button>{' '}
+              <button type="button" className="secondary" onClick={() => setNewToken('')}>
+                Dismiss
+              </button>
+            </div>
+          )}
+          {credentials.data?.items.map((credential: any) => (
+            <p key={credential.id}>
+              <strong>{credential.name}</strong> · {credential.tokenPrefix} ·{' '}
+              {credential.revokedAt ? 'revoked' : credential.scopes.join(', ')}{' '}
+              {!credential.revokedAt && (
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => revokeApiCredential.mutate(credential.id)}
+                >
+                  Revoke
+                </button>
+              )}
+            </p>
+          ))}
+        </form>
+        <section className="panel">
+          <h2>Trash</h2>
+          {!trash.data?.items.length && <p className="muted">Trash is empty.</p>}
+          {trash.data?.items.map((book: any) => (
+            <p key={book.id}>
+              {book.title}{' '}
+              <button className="secondary" onClick={() => restoreTrash.mutate(book.id)}>
+                Restore
+              </button>{' '}
+              <button
+                className="secondary"
+                onClick={() => {
+                  if (window.confirm(`Permanently delete “${book.title}”? This cannot be undone.`))
+                    permanentlyDeleteTrash.mutate(book.id);
+                }}
+              >
+                Delete permanently
+              </button>
+            </p>
+          ))}
+        </section>
+        <section className="panel">
+          <h2>Recent API activity</h2>
+          {!audit.data?.items.length && <p className="muted">No assistant activity yet.</p>}
+          {audit.data?.items.map((event: any) => (
+            <p key={event.id}>
+              <strong>{event.credentialName || event.actorType}</strong> · {event.operation} ·{' '}
+              {event.statusCode}
+            </p>
+          ))}
+        </section>
         <section className="panel">
           <h2>Download backup</h2>
           <p>JSON is portable. SQLite preserves the complete database.</p>
