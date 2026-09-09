@@ -1,0 +1,19 @@
+services:
+  librarium:
+    image: ghcr.io/m4rvin42/librarium:1.0
+    restart: unless-stopped
+    ports:
+      - '8787:3000'
+    env_file:
+      - .env
+    volumes:
+      - librarium-data:/data
+    healthcheck:
+      test: ['CMD', 'node', 'dist/healthcheck.js']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  librarium-data:
