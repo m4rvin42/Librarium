@@ -14,6 +14,7 @@ import { z } from 'zod';
 import {
   ApiCredentialInput,
   BookInput,
+  BookPhotoRole,
   BookQuery,
   BookPatch,
   ConfirmationAction,
@@ -48,6 +49,7 @@ import { metadataSettingsStatus, saveMetadataSettings } from './metadata-setting
 import {
   analyzeCoverCorners,
   analyzeImage,
+  analyzeBookPhotos,
   detectBarcode,
   normalizeImage,
   straightenCover,
@@ -943,6 +945,126 @@ export async function buildApp() {
       : reply.code(404).send(error('NOT_FOUND', 'Reading session not found')),
   );
 
+  app.post('/api/v1/imports/book-photos', async (req, reply) => {
+    const batchId = id(),
+      timestamp = now();
+    db.prepare(
+      'INSERT INTO import_batches(id,kind,status,created_at,updated_at) VALUES(?,?,?,?,?)',
+    ).run(batchId, 'images', 'processing', timestamp, timestamp);
+    (req as any).importBatchId = batchId;
+    const photos: { buffer: Buffer; role: string; imageId: string }[] = [];
+    for await (const part of req.files()) {
+      const role = BookPhotoRole.parse(part.fieldname);
+      if (!part.mimetype.startsWith('image/')) throw new Error('Only image uploads are accepted');
+      if (role === 'front' && photos.some((photo) => photo.role === 'front'))
+        throw new Error('Select only one front cover. Mark extra photos as details.');
+      const imageId = id(),
+        target = path.join(config.dataDir, 'imports', batchId, `${imageId}.jpg`);
+      const normalized = await normalizeImage(await part.toBuffer(), target);
+      db.prepare(
+        'INSERT INTO import_images(id,batch_id,filename,mime_type,path,width,height,created_at) VALUES(?,?,?,?,?,?,?,?)',
+      ).run(
+        imageId,
+        batchId,
+        path.basename(part.filename),
+        normalized.mime,
+        target,
+        normalized.width,
+        normalized.height,
+        now(),
+      );
+      photos.push({ buffer: normalized.buffer, role, imageId });
+    }
+    if (!photos.length) throw new Error('No photos uploaded');
+    const detected = await analyzeBookPhotos(photos);
+    const isbns = new Set<string>();
+    for (const photo of photos) {
+      const isbn = await detectBarcode(photo.buffer);
+      if (isbn) isbns.add(isbn);
+    }
+    if (detected.isbn) {
+      try {
+        isbns.add(parseIsbn(detected.isbn).isbn13);
+      } catch {
+        detected.visibleText.push('Printed ISBN failed checksum validation; omitted.');
+      }
+    }
+    if (isbns.size > 1)
+      throw new Error('Photos contain conflicting ISBNs. Use photos of the same edition.');
+    if (!detected.title?.trim())
+      throw new Error('No unambiguous book title was detected. Check the photos and try again.');
+    const isbn = [...isbns][0];
+    const metadata: any = isbn ? await lookupIsbn(isbn).catch(() => null) : null;
+    const proposal: any = { ...metadata };
+    for (const key of [
+      'title',
+      'subtitle',
+      'publisher',
+      'publicationDate',
+      'language',
+      'pageCount',
+      'description',
+    ] as const) {
+      if (detected[key] !== null) proposal[key] = detected[key];
+    }
+    if (detected.authors.length) proposal.authors = detected.authors;
+    if (isbn) Object.assign(proposal, { isbn13: isbn, isbn10: parseIsbn(isbn).isbn10 });
+    proposal.metadataSource = 'book-photo-analysis';
+    const validated = BookInput.parse(proposal);
+    const front = photos.find((photo) => photo.role === 'front');
+    let frontImageId = front?.imageId;
+    if (front && detected.frontCoverCorners) {
+      // Preserve the original photo and show the extracted cover separately for approval.
+      let extracted: Buffer | null = null;
+      try {
+        extracted = await straightenCover(front.buffer, { corners: detected.frontCoverCorners });
+      } catch {
+        detected.visibleText.push('Cover boundaries were unclear; original front photo retained.');
+      }
+      if (extracted) {
+        frontImageId = id();
+        const target = path.join(config.dataDir, 'imports', batchId, `${frontImageId}.jpg`);
+        const normalized = await normalizeImage(extracted, target);
+        db.prepare(
+          'INSERT INTO import_images(id,batch_id,filename,mime_type,path,width,height,created_at) VALUES(?,?,?,?,?,?,?,?)',
+        ).run(
+          frontImageId,
+          batchId,
+          'extracted-cover.jpg',
+          normalized.mime,
+          target,
+          normalized.width,
+          normalized.height,
+          now(),
+        );
+      }
+    }
+    db.transaction(() => {
+      db.prepare(
+        'INSERT INTO import_candidates(id,batch_id,title,author,isbn10,isbn13,confidence,evidence,metadata,alternatives,review_status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      ).run(
+        id(),
+        batchId,
+        validated.title,
+        validated.authors[0] ?? null,
+        validated.isbn10 ?? null,
+        validated.isbn13 ?? null,
+        detected.confidence,
+        JSON.stringify(detected.visibleText),
+        JSON.stringify({ ...validated, _frontImageId: frontImageId }),
+        '[]',
+        'pending',
+        now(),
+        now(),
+      );
+      db.prepare("UPDATE import_batches SET status='review',updated_at=? WHERE id=?").run(
+        now(),
+        batchId,
+      );
+    })();
+    return reply.code(202).send(getImport(batchId));
+  });
+
   app.post('/api/v1/imports/images', async (req, reply) => {
     const batchId = id(),
       timestamp = now();
@@ -1068,7 +1190,7 @@ export async function buildApp() {
         .prepare('SELECT * FROM import_candidates WHERE batch_id=?')
         .all(batchId) as any[];
       for (const row of rows) {
-        if (!selected.has(row.id)) continue;
+        if (!selected.has(row.id) || row.review_status !== 'pending') continue;
         const alternatives = JSON.parse(row.alternatives || '[]');
         let metadata = editions[row.id] ?? (row.metadata ? JSON.parse(row.metadata) : null);
         if (!metadata && alternatives.length === 1) metadata = alternatives[0];
@@ -1112,6 +1234,21 @@ export async function buildApp() {
             notes: null,
           }),
         );
+        // Only trust the server-staged cover identity, never a client-supplied path.
+        const frontImageId = row.metadata ? JSON.parse(row.metadata)._frontImageId : null;
+        if (frontImageId) {
+          const source = db
+            .prepare('SELECT path FROM import_images WHERE id=? AND batch_id=?')
+            .get(frontImageId, batchId) as any;
+          if (!source) throw new Error('Staged front cover is missing');
+          const book = created[created.length - 1];
+          const relative = path.join('books', book.id, `${frontImageId}.jpg`);
+          const target = path.join(config.dataDir, 'images', relative);
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.copyFileSync(source.path, target);
+          setBookLocalCover(book.id, relative);
+          created[created.length - 1] = getBook(book.id);
+        }
         db.prepare(
           "UPDATE import_candidates SET review_status='approved',metadata=?,updated_at=? WHERE id=?",
         ).run(JSON.stringify(metadata), now(), row.id);
@@ -1354,6 +1491,7 @@ export async function buildApp() {
         route.includes('/enrich') ||
         route.includes('/images/') ||
         route.endsWith('/images') ||
+        route.endsWith('/book-photos') ||
         route === '/api/v1/imports/isbn' ||
         route === '/api/v1/imports/isbn/bulk'
       )

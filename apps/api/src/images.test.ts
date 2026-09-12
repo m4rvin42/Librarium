@@ -1,6 +1,58 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+const createResponse = vi.hoisted(() => vi.fn());
+vi.mock('openai', () => ({
+  default: class {
+    responses = { create: createResponse };
+  },
+}));
 import sharp from 'sharp';
-import { straightenCover, validateCoverCorners } from './images.js';
+import { analyzeBookPhotos, straightenCover, validateCoverCorners } from './images.js';
+import { config } from './config.js';
+
+describe('combined photo analysis', () => {
+  it('sends every photo with its role and requests a description and cover corners', async () => {
+    const enabled = config.visionEnabled;
+    config.visionEnabled = true;
+    try {
+      createResponse.mockResolvedValue({
+        output_text: JSON.stringify({
+          title: 'Book',
+          authors: [],
+          isbn: null,
+          subtitle: null,
+          publisher: null,
+          publicationDate: null,
+          language: null,
+          pageCount: null,
+          description: 'Back text',
+          visibleText: [],
+          confidence: 0.8,
+          frontCoverCorners: null,
+        }),
+      });
+      const result = await analyzeBookPhotos([
+        { role: 'front', buffer: Buffer.from('front') },
+        { role: 'back', buffer: Buffer.from('back') },
+      ]);
+      expect(result.description).toBe('Back text');
+      const request = createResponse.mock.calls[0]![0];
+      expect(
+        request.input[0].content.filter((item: any) => item.type === 'input_image'),
+      ).toHaveLength(2);
+      expect(request.input[0].content.some((item: any) => item.text === 'Photo role: back')).toBe(
+        true,
+      );
+      expect(request.text.format.schema.required).toContain('description');
+      createResponse.mockRejectedValue(new Error('private upstream request'));
+      await expect(
+        analyzeBookPhotos([{ role: 'front', buffer: Buffer.from('front') }]),
+      ).rejects.toThrow('Book photo analysis failed.');
+    } finally {
+      config.visionEnabled = enabled;
+      createResponse.mockReset();
+    }
+  });
+});
 
 describe('cover straightening', () => {
   it('validates clockwise, distinct cover corners', () => {

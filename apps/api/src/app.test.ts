@@ -1,4 +1,5 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as images from './images.js';
 import sharp from 'sharp';
 import { buildApp } from './app.js';
 import { db, id, now } from './db.js';
@@ -13,6 +14,92 @@ afterAll(() => app.close());
 const bearer = { authorization: 'Bearer test-token' };
 
 describe('API', () => {
+  it('combines front/back photos and saves the cover only after approval', async () => {
+    const analyze = vi.spyOn(images, 'analyzeBookPhotos').mockResolvedValue({
+      frontCoverCorners: [
+        { x: 0.1, y: 0.1 },
+        { x: 0.9, y: 0.1 },
+        { x: 0.9, y: 0.9 },
+        { x: 0.1, y: 0.9 },
+      ],
+      title: 'Photo book',
+      authors: ['Photo author'],
+      isbn: null,
+      subtitle: null,
+      publisher: null,
+      publicationDate: null,
+      language: 'de',
+      pageCount: null,
+      description: 'Original back-cover text.',
+      confidence: 0.9,
+      visibleText: ['Photo book'],
+    });
+    const photo = await sharp({
+      create: { width: 20, height: 30, channels: 3, background: 'white' },
+    })
+      .jpeg()
+      .toBuffer();
+    const boundary = 'book-photo-test';
+    const payload = Buffer.concat(
+      ['front', 'back']
+        .flatMap((role) => [
+          Buffer.from(
+            `--${boundary}\r\nContent-Disposition: form-data; name="${role}"; filename="${role}.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`,
+          ),
+          photo,
+          Buffer.from('\r\n'),
+        ])
+        .concat(Buffer.from(`--${boundary}--\r\n`)),
+    );
+    try {
+      const result = await app.inject({
+        method: 'POST',
+        url: '/api/v1/imports/book-photos',
+        headers: { ...bearer, 'content-type': `multipart/form-data; boundary=${boundary}` },
+        payload,
+      });
+      expect(result.statusCode).toBe(202);
+      expect(analyze.mock.calls[0]![0].map((p) => p.role)).toEqual(['front', 'back']);
+      const batch = result.json();
+      expect(batch.candidates).toHaveLength(1);
+      expect(batch.images.some((image: any) => image.filename === 'extracted-cover.jpg')).toBe(
+        true,
+      );
+      expect(batch.candidates[0].metadata.description).toBe('Original back-cover text.');
+      expect((await app.inject({ url: '/api/v1/books', headers: bearer })).json().total).toBe(0);
+      const approve = await app.inject({
+        method: 'POST',
+        url: `/api/v1/imports/${batch.id}/approve`,
+        headers: bearer,
+        payload: { candidateIds: [batch.candidates[0].id] },
+      });
+      expect(approve.statusCode).toBe(200);
+      const book = approve.json().created[0];
+      expect(book.description).toBe('Original back-cover text.');
+      expect(book.localCover).toBeTruthy();
+      expect(
+        (await app.inject({ url: `/api/v1/books/${book.id}/cover`, headers: bearer })).statusCode,
+      ).toBe(200);
+      const barcode = vi
+        .spyOn(images, 'detectBarcode')
+        .mockResolvedValueOnce('9780306406157')
+        .mockResolvedValueOnce('9780441172719');
+      try {
+        const conflict = await app.inject({
+          method: 'POST',
+          url: '/api/v1/imports/book-photos',
+          headers: { ...bearer, 'content-type': `multipart/form-data; boundary=${boundary}` },
+          payload,
+        });
+        expect(conflict.statusCode).toBe(400);
+        expect(conflict.json().error.message).toContain('conflicting ISBNs');
+      } finally {
+        barcode.mockRestore();
+      }
+    } finally {
+      analyze.mockRestore();
+    }
+  });
   it('requires authentication', async () => {
     expect((await app.inject({ url: '/api/v1/books' })).statusCode).toBe(401);
     expect((await app.inject({ url: '/api/v1/books', headers: bearer })).statusCode).toBe(200);

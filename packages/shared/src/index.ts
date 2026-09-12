@@ -54,6 +54,25 @@ export const ImageCandidate = z.object({
 });
 export const ImageAnalysis = z.object({ books: z.array(ImageCandidate).max(100) });
 
+export const BookPhotoRole = z.enum(['front', 'back', 'detail']);
+export const BookPhotoAnalysis = z.object({
+  frontCoverCorners: z
+    .array(z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) }))
+    .length(4)
+    .nullable(),
+  title: z.string().max(500).nullable(),
+  authors: z.array(z.string().max(200)),
+  isbn: z.string().nullable(),
+  subtitle: z.string().max(500).nullable(),
+  publisher: z.string().max(300).nullable(),
+  publicationDate: z.string().max(32).nullable(),
+  language: z.string().max(16).nullable(),
+  pageCount: z.number().int().positive().nullable(),
+  description: z.string().max(50000).nullable(),
+  visibleText: z.array(z.string().max(500)).max(100),
+  confidence: z.number().min(0).max(1),
+});
+
 export const metadataProviders = ['openlibrary', 'googlebooks', 'openai-web-search'] as const;
 export const MetadataProvider = z.enum(metadataProviders);
 export const MetadataSettingsInput = z.object({
