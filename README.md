@@ -26,6 +26,28 @@ See [architecture details](docs/architecture.md).
 
 The volume contains /data/librarium.sqlite, /data/images, /data/imports, and /data/backups. Inspect with docker compose ps and docker compose logs -f librarium.
 
+### Camera import: front and back of one book
+
+In **Add books → Images**, choose **One book — combine front, back and details**.
+Use **Take photo** repeatedly; each capture stays in the photo list. **Choose existing photos**
+opens the gallery without requesting the camera. Assign one photo as **Front cover**, another
+as **Back cover**, and any others as **Other detail**. Remove or replace bad shots before continuing.
+The upload limit remains ten photos, with `MAX_IMAGE_SIZE_MB` applying to each photo.
+
+The new `/api/v1/imports/book-photos` endpoint accepts multipart files named `front`, `back`, or
+`detail`. It sends the photos together to the configured OpenAI vision model, transcribes visible
+back-cover text, extracts bibliographic fields, validates printed/barcode ISBNs, and fills missing
+fields from ISBN metadata where available. Conflicting ISBNs are rejected. The front cover is
+cropped/straightened when usable corners are detected; otherwise the original front photo is kept.
+Review the cover preview, ISBN, description and evidence before approval. Nothing is added to the
+catalog until approval, which also saves the selected local cover. No database migration is required.
+
+This combined mode requires enabled OpenAI image analysis and sends **all** selected photos to
+OpenAI, even when a barcode is readable. **Multiple books / shelf** preserves the separate-image,
+barcode-first import. Actual camera launch depends on the phone/browser; test successive captures
+on iOS Safari and Android Chrome after deployment. The app now supplies its own button labels
+instead of the browser's ambiguous native file-selection label.
+
 ### Deploy a published image
 
 Release images are available from GitHub Container Registry, so another Compose project can use `image: ghcr.io/m4rvin42/librarium:<version>` without cloning this repository or building locally. See [published-image deployment](docs/container-image-deployment.md) for a complete Compose file, configuration, updates, and registry-access notes.

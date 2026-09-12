@@ -17,6 +17,7 @@ import {
   useParams,
 } from 'react-router-dom';
 import { api, setCsrf } from './api';
+import { BookPhoto, CameraInput, PhotoPicker } from './PhotoPicker';
 import './styles.css';
 
 const queryClient = new QueryClient();
@@ -613,7 +614,7 @@ function BookDetails() {
               </label>
               <label>
                 Image
-                <input name="image" type="file" accept="image/*" capture="environment" required />
+                <CameraInput />
               </label>
               <button disabled={enrich.isPending}>
                 {enrich.isPending ? 'Analysing…' : 'Analyse photo'}
@@ -683,6 +684,8 @@ function BookDetails() {
 }
 
 function AddBooks() {
+  const [photos, setPhotos] = useState<BookPhoto[]>([]);
+  const [photoMode, setPhotoMode] = useState('single');
   const navigate = useNavigate(),
     [tab, setTab] = useState('isbn'),
     [message, setMessage] = useState(''),
@@ -739,7 +742,15 @@ function AddBooks() {
         setMessage(`Imported ${result.created} of ${result.total} entries.`);
       }
       if (tab === 'images') {
-        const result = await api<any>('/imports/images', { method: 'POST', body: form });
+        if (!photos.length) throw new Error('Take a photo or choose existing photos first.');
+        const upload = new FormData();
+        photos.forEach((photo) =>
+          upload.append(photoMode === 'single' ? photo.role : 'images', photo.file),
+        );
+        const result = await api<any>(
+          photoMode === 'single' ? '/imports/book-photos' : '/imports/images',
+          { method: 'POST', body: upload },
+        );
         navigate(`/imports/${result.id}`);
       }
     } catch (error) {
@@ -855,20 +866,24 @@ function AddBooks() {
         )}
         {tab === 'images' && (
           <>
-            <p>
-              Upload a cover, barcode, spines, or a full shelf. Detected books always go to review.
-            </p>
             <label>
-              Book images
-              <input
-                name="images"
-                type="file"
-                accept="image/jpeg,image/png,image/webp,image/heic"
-                capture="environment"
-                multiple
-                required
-              />
+              Photo import mode{' '}
+              <select
+                value={photoMode}
+                disabled={busy}
+                onChange={(e) => setPhotoMode(e.target.value)}
+              >
+                <option value="single">One book — combine front, back and details</option>
+                <option value="shelf">
+                  Multiple books / shelf — analyse each photo separately
+                </option>
+              </select>
             </label>
+            <p>
+              Detected information stays in review until you approve it. Single-book analysis sends
+              all selected photos to the configured AI service.
+            </p>
+            <PhotoPicker photos={photos} onChange={setPhotos} disabled={busy} />
           </>
         )}
         <button disabled={busy}>{busy ? 'Working…' : 'Continue'}</button>
@@ -951,6 +966,18 @@ function Review() {
             <div>
               <h3>{c.metadata?.title || c.title || 'Unreadable title'}</h3>
               <p>{c.metadata?.authors?.join(', ') || c.author || 'Unknown author'}</p>
+              {c.metadata?.isbn13 && <p>ISBN: {c.metadata.isbn13}</p>}
+              {c.metadata?.description && <p>{c.metadata.description}</p>}
+              {c.metadata?._frontImageId && (
+                <>
+                  <p>Selected local cover:</p>
+                  <img
+                    alt="Front cover to save"
+                    style={{ width: 100 }}
+                    src={`/api/v1/imports/${query.data.id}/images/${c.metadata._frontImageId}`}
+                  />
+                </>
+              )}
               <p>
                 Confidence {Math.round(c.confidence * 100)}% · Evidence: {c.evidence.join(', ')}
               </p>
