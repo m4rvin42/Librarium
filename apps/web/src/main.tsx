@@ -19,6 +19,7 @@ import {
 import { api, setCsrf } from './api';
 import { BookPhoto, CameraInput, PhotoPicker } from './PhotoPicker';
 import './styles.css';
+import { About } from './About';
 
 const queryClient = new QueryClient();
 const enrichmentFields = [
@@ -87,7 +88,8 @@ function Login() {
   return (
     <main className="login">
       <form onSubmit={submit}>
-        <h1>Librarium</h1>
+        <img className="login-logo" src="/librarium-logo.png" alt="Librarium" />
+        <h1 className="sr-only">Librarium</h1>
         <p>Your private library.</p>
         <label>
           Username
@@ -118,12 +120,16 @@ function App() {
     <>
       <header>
         <Link className="brand" to="/">
+          <span className="brand-mark" aria-hidden="true">
+            <img src="/librarium-logo.png" alt="" />
+          </span>
           Librarium
         </Link>
         <nav>
           <NavLink to="/library">Library</NavLink>
           <NavLink to="/add">Add books</NavLink>
           <NavLink to="/settings">Settings</NavLink>
+          <NavLink to="/about">About</NavLink>
         </nav>
       </header>
       <Routes>
@@ -133,6 +139,7 @@ function App() {
         <Route path="/add" element={<AddBooks />} />
         <Route path="/imports/:id" element={<Review />} />
         <Route path="/settings" element={<Settings />} />
+        <Route path="/about" element={<About />} />
       </Routes>
     </>
   );

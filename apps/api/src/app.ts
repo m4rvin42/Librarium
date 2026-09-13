@@ -234,7 +234,7 @@ export async function buildApp() {
   app.get('/api/v1/health', async () => ({
     status: 'ok',
     database: 'connected',
-    version: '1.0.0',
+    version: config.appVersion,
   }));
   app.post(
     '/api/v1/auth/login',
