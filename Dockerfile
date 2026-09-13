@@ -10,6 +10,8 @@ COPY . .
 RUN npm run build
 
 FROM node:22-bookworm-slim AS runtime
+ARG APP_VERSION=development
+ENV APP_VERSION=${APP_VERSION}
 ENV NODE_ENV=production PORT=3000 DATABASE_PATH=/data/librarium.sqlite DATA_DIRECTORY=/data
 WORKDIR /app
 RUN groupadd --system --gid 10001 librarium && useradd --system --uid 10001 --gid librarium --home /app librarium && mkdir -p /data && chown librarium:librarium /data

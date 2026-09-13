@@ -1,5 +1,12 @@
 # Librarium
 
+The **About** page displays the installed application's version and links to this repository.
+The approved Librarium seal logo is included at `apps/web/public/librarium-logo.png`.
+Published release images embed their GitHub release tag through the `APP_VERSION` Docker build argument.
+Local builds display `development` unless `APP_VERSION` is set; for example, build with
+`docker build --build-arg APP_VERSION=v1.0.3 -t librarium:local .` for that release's source.
+The `/api/v1/health` endpoint reports the same version as About.
+
 Librarium is a private, self-hosted catalog for physical and digital books. It supports manual entry, ISBN imports, image review, reading history, search, and portable backups. The React UI and REST API run in one Fastify container; SQLite and managed files live in one persistent volume.
 
 Screenshot placeholder: dashboard and mobile import-review screenshots will accompany the first branded release.

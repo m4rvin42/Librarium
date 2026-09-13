@@ -14,6 +14,7 @@ function configuredProviders(value: string | undefined): MetadataProvider[] {
 }
 
 export const config = {
+  appVersion: process.env.APP_VERSION?.trim() || 'development',
   port: Number(process.env.PORT || 3000),
   dataDir: process.env.DATA_DIRECTORY || path.resolve('data'),
   dbPath: process.env.DATABASE_PATH || path.resolve('data/librarium.sqlite'),
