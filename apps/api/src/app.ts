@@ -700,6 +700,19 @@ export async function buildApp() {
       return reply.code(404).send(error('NOT_FOUND', 'Local cover not found'));
     return reply.type('image/jpeg').send(fs.createReadStream(coverPath));
   });
+  app.get('/api/v1/books/:id/back-cover', async (req, reply) => {
+    const bookId = (req.params as any).id;
+    if (!getBook(bookId)) return reply.code(404).send(error('NOT_FOUND', 'Book not found'));
+    const image = db
+      .prepare("SELECT path,mime_type FROM book_images WHERE book_id=? AND kind='back_cover'")
+      .get(bookId) as { path: string; mime_type: string } | undefined;
+    if (!image) return reply.code(404).send(error('NOT_FOUND', 'Back cover not found'));
+    const imageRoot = path.resolve(config.dataDir, 'images');
+    const imagePath = path.resolve(imageRoot, image.path);
+    if (!imagePath.startsWith(`${imageRoot}${path.sep}`) || !fs.existsSync(imagePath))
+      return reply.code(404).send(error('NOT_FOUND', 'Back cover not found'));
+    return reply.type(image.mime_type).send(fs.createReadStream(imagePath));
+  });
   app.get('/api/v1/books/:id/cover-drafts/:draftId', async (req, reply) => {
     const { id: bookId, draftId } = req.params as any;
     const draft = db
@@ -1034,19 +1047,40 @@ export async function buildApp() {
       photos.push({ buffer: normalized.buffer, role, imageId });
     }
     if (!photos.length) throw new Error('No photos uploaded');
-    const detected = await analyzeBookPhotos(photos);
     const isbns = new Set<string>();
     for (const photo of photos) {
       const isbn = await detectBarcode(photo.buffer);
       if (isbn) isbns.add(isbn);
+    }
+    if (isbns.size > 1)
+      throw new Error('Photos contain conflicting ISBNs. Use photos of the same edition.');
+    let detected: Awaited<ReturnType<typeof analyzeBookPhotos>>;
+    try {
+      detected = await analyzeBookPhotos(photos);
+    } catch (analysisError) {
+      const barcodeIsbn = [...isbns][0];
+      if (!barcodeIsbn) throw analysisError;
+      // A locally decoded, checksum-valid barcode is sufficient for a direct single-book scan.
+      detected = {
+        frontCoverCorners: null,
+        title: null,
+        authors: [],
+        isbn: null,
+        subtitle: null,
+        publisher: null,
+        publicationDate: null,
+        language: null,
+        pageCount: null,
+        description: null,
+        visibleText: [`ISBN ${barcodeIsbn} read from barcode; AI details were unavailable.`],
+        confidence: 1,
+      };
     }
     const printedIsbn = await resolveImageIsbn([detected.isbn]);
     if (printedIsbn.isbn13) isbns.add(printedIsbn.isbn13);
     detected.visibleText.push(...printedIsbn.evidence);
     if (isbns.size > 1)
       throw new Error('Photos contain conflicting ISBNs. Use photos of the same edition.');
-    if (!detected.title?.trim())
-      throw new Error('No unambiguous book title was detected. Check the photos and try again.');
     const isbn = [...isbns][0];
     const metadata: any = isbn
       ? printedIsbn.isbn13 === isbn && printedIsbn.metadata
@@ -1067,9 +1101,16 @@ export async function buildApp() {
     }
     if (detected.authors.length) proposal.authors = detected.authors;
     if (isbn) Object.assign(proposal, { isbn13: isbn, isbn10: parseIsbn(isbn).isbn10 });
+    if (!proposal.title?.trim())
+      throw new Error(
+        isbn
+          ? `ISBN ${isbn} was recognized, but no matching title was found. Check the metadata providers or enter the ISBN manually.`
+          : 'No valid ISBN or unambiguous book title was detected. Try a close, well-lit photo of the barcode or include the front cover.',
+      );
     proposal.metadataSource = 'book-photo-analysis';
     const validated = BookInput.parse(proposal);
     const front = photos.find((photo) => photo.role === 'front');
+    const back = photos.find((photo) => photo.role === 'back');
     let frontImageId = front?.imageId;
     if (front && detected.frontCoverCorners) {
       // Preserve the original photo and show the extracted cover separately for approval.
@@ -1109,7 +1150,11 @@ export async function buildApp() {
         validated.isbn13 ?? null,
         detected.confidence,
         JSON.stringify(detected.visibleText),
-        JSON.stringify({ ...validated, _frontImageId: frontImageId }),
+        JSON.stringify({
+          ...validated,
+          _frontImageId: frontImageId,
+          _backImageId: back?.imageId,
+        }),
         '[]',
         'pending',
         now(),
@@ -1301,7 +1346,8 @@ export async function buildApp() {
           }),
         );
         // Only trust the server-staged cover identity, never a client-supplied path.
-        const frontImageId = row.metadata ? JSON.parse(row.metadata)._frontImageId : null;
+        const stagedMetadata = row.metadata ? JSON.parse(row.metadata) : null;
+        const frontImageId = stagedMetadata?._frontImageId;
         if (frontImageId) {
           const source = db
             .prepare('SELECT path FROM import_images WHERE id=? AND batch_id=?')
@@ -1313,6 +1359,25 @@ export async function buildApp() {
           fs.mkdirSync(path.dirname(target), { recursive: true });
           fs.copyFileSync(source.path, target);
           setBookLocalCover(book.id, relative);
+          created[created.length - 1] = getBook(book.id);
+        }
+        const backImageId = stagedMetadata?._backImageId;
+        if (backImageId) {
+          const source = db
+            .prepare('SELECT path,mime_type FROM import_images WHERE id=? AND batch_id=?')
+            .get(backImageId, batchId) as any;
+          if (!source) throw new Error('Staged back cover is missing');
+          const book = created[created.length - 1];
+          const relative = path.join('books', book.id, `${backImageId}-back.jpg`);
+          const target = path.join(config.dataDir, 'images', relative);
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.copyFileSync(source.path, target);
+          db.prepare(
+            `INSERT INTO book_images(id,book_id,kind,path,mime_type,created_at)
+             VALUES(?,?,?,?,?,?)
+             ON CONFLICT(book_id,kind) DO UPDATE SET
+               id=excluded.id,path=excluded.path,mime_type=excluded.mime_type,created_at=excluded.created_at`,
+          ).run(id(), book.id, 'back_cover', relative, source.mime_type, now());
           created[created.length - 1] = getBook(book.id);
         }
         db.prepare(

@@ -14,6 +14,9 @@ function hydrate(row: Row, options: { summary?: boolean; includeNotes?: boolean 
       'SELECT c.name FROM categories c JOIN book_categories bc ON c.id=bc.category_id WHERE bc.book_id=? ORDER BY c.name',
     )
     .all(row.id) as Row[];
+  const backCoverAvailable = Boolean(
+    db.prepare("SELECT 1 FROM book_images WHERE book_id=? AND kind='back_cover'").get(row.id),
+  );
   const book = {
     id: row.id,
     isbn10: row.isbn10,
@@ -30,6 +33,7 @@ function hydrate(row: Row, options: { summary?: boolean; includeNotes?: boolean 
     coverUrl: row.cover_url,
     localCover: row.local_cover,
     coverAvailable: Boolean(row.local_cover || row.cover_url),
+    backCoverAvailable,
     editionFormat: row.edition_format,
     ownershipStatus: row.ownership_status,
     readingStatus: row.reading_status,
@@ -62,6 +66,7 @@ function hydrate(row: Row, options: { summary?: boolean; includeNotes?: boolean 
     readingStatus: book.readingStatus,
     rating: book.rating,
     coverAvailable: book.coverAvailable,
+    backCoverAvailable: book.backCoverAvailable,
     dateAdded: book.dateAdded,
     dateUpdated: book.dateUpdated,
   };

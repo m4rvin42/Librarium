@@ -43,6 +43,7 @@ type Book = {
   authors: string[];
   coverUrl?: string;
   localCover?: string;
+  backCoverAvailable?: boolean;
   publisher?: string;
   publicationDate?: string;
   language?: string;
@@ -371,6 +372,7 @@ function BookDetails() {
   const [selectedProposalFields, setSelectedProposalFields] = useState<string[]>([]);
   const [coverDraft, setCoverDraft] = useState<CoverDraft | null>(null);
   const [usePhotoAsCover, setUsePhotoAsCover] = useState(false);
+  const [showBackCover, setShowBackCover] = useState(false);
   const query = useQuery({ queryKey: ['book', id], queryFn: () => api<Book>(`/books/${id}`) });
   const remove = useMutation({
     mutationFn: () => api(`/books/${id}`, { method: 'DELETE' }),
@@ -422,13 +424,33 @@ function BookDetails() {
     <main>
       <Link to="/library">← Library</Link>
       <article className="details">
-        {b.localCover ? (
-          <img src={`/api/v1/books/${b.id}/cover`} alt="" />
-        ) : b.coverUrl ? (
-          <img src={b.coverUrl} alt="" />
-        ) : (
-          <div className="large-cover">L</div>
-        )}
+        <div className="book-images">
+          {b.localCover ? (
+            <img src={`/api/v1/books/${b.id}/cover`} alt={`Front cover of ${b.title}`} />
+          ) : b.coverUrl ? (
+            <img src={b.coverUrl} alt={`Front cover of ${b.title}`} />
+          ) : (
+            <div className="large-cover">L</div>
+          )}
+          {b.backCoverAvailable && (
+            <div className="back-cover-viewer">
+              <button
+                type="button"
+                className="secondary"
+                aria-expanded={showBackCover}
+                onClick={() => setShowBackCover(!showBackCover)}
+              >
+                {showBackCover ? 'Hide scanned back cover' : 'View scanned back cover'}
+              </button>
+              {showBackCover && (
+                <img
+                  src={`/api/v1/books/${b.id}/back-cover`}
+                  alt={`Scanned back cover of ${b.title}`}
+                />
+              )}
+            </div>
+          )}
+        </div>
         <div>
           <p className="eyebrow">
             {b.editionFormat || 'Book'} · {b.readingStatus}
@@ -709,7 +731,8 @@ export function ImageDetectionInfo() {
           <ul>
             <li>
               <strong>One book:</strong> all selected photos are normalized and sent to the
-              configured AI vision service. Barcodes are also scanned locally.
+              configured AI vision service. Barcodes are scanned locally first; a valid barcode can
+              complete the import from ISBN metadata even if AI details are unavailable.
             </li>
             <li>
               <strong>Multiple books / shelf:</strong> each photo is scanned locally for a barcode
@@ -741,7 +764,7 @@ function AddBooks() {
   const [photos, setPhotos] = useState<BookPhoto[]>([]);
   const [photoMode, setPhotoMode] = useState('single');
   const navigate = useNavigate(),
-    [tab, setTab] = useState('isbn'),
+    [tab, setTab] = useState('images'),
     [message, setMessage] = useState(''),
     [busy, setBusy] = useState(false);
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -818,7 +841,7 @@ function AddBooks() {
       <p className="eyebrow">Catalog</p>
       <h1>Add books</h1>
       <div className="tabs">
-        {['manual', 'isbn', 'bulk', 'images'].map((x) => (
+        {['images', 'isbn', 'manual', 'bulk'].map((x) => (
           <button
             className={tab === x ? 'active secondary' : 'secondary'}
             onClick={() => setTab(x)}
@@ -920,6 +943,12 @@ function AddBooks() {
         )}
         {tab === 'images' && (
           <>
+            <PhotoPicker
+              photos={photos}
+              onChange={setPhotos}
+              disabled={busy}
+              singleBook={photoMode === 'single'}
+            />
             <label>
               Photo import mode{' '}
               <select
@@ -938,7 +967,6 @@ function AddBooks() {
               all selected photos to the configured AI service.
             </p>
             <ImageDetectionInfo />
-            <PhotoPicker photos={photos} onChange={setPhotos} disabled={busy} />
           </>
         )}
         <button disabled={busy}>{busy ? 'Working…' : 'Continue'}</button>
