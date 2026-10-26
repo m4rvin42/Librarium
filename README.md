@@ -67,9 +67,23 @@ docker pull ghcr.io/m4rvin42/librarium:latest
 
 ## Development
 
-Node.js 22 is required. Run npm ci, copy .env.example to .env, point DATABASE_PATH and DATA_DIRECTORY at local writable paths, then run npm run db:migrate, npm run db:seed, and npm run dev. Vite runs at http://localhost:5173 and proxies Fastify on port 3000.
+Docker is the canonical build and verification environment. The default image build uses Node.js 22
+and runs linting, type checks, tests, and the production build before creating the runtime image:
 
-Verify with npm run lint, npm run typecheck, npm test, and npm run build.
+```sh
+docker build -t librarium:local .
+```
+
+To run only the verification stage, use:
+
+```sh
+docker build --target verify -t librarium:verify .
+```
+
+For host-based development, Node.js 22 is required. Run npm ci, copy .env.example to .env, point DATABASE_PATH and DATA_DIRECTORY at local writable paths, then run npm run db:migrate, npm run db:seed, and npm run dev. Vite runs at http://localhost:5173 and proxies Fastify on port 3000.
+
+The equivalent host-side checks are `npm run lint`, `npm run typecheck`, `npm test`, and
+`npm run build`.
 
 ## Configuration
 

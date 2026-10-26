@@ -23,22 +23,8 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name }}
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-      - name: Lint
-        run: npm run lint
-      - name: Typecheck
-        run: npm run typecheck
-      - name: Test
-        run: npm test
-      - name: Build
-        run: npm run build
+      - name: Verify release in Node 22 container
+        run: docker build --target verify -t librarium:verify .
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

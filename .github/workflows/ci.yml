@@ -7,13 +7,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
-      - run: docker build -t librarium:test .
+      - name: Verify and build in Node 22 container
+        run: docker build -t librarium:test .
+      - name: Smoke-test container health
+        run: |
+          docker run --detach --name librarium-smoke \
+            --env ADMIN_PASSWORD=smoke-test-password \
+            --env OPENAI_IMAGE_ANALYSIS_ENABLED=false \
+            librarium:test
+          trap 'docker rm --force librarium-smoke' EXIT
+          for attempt in $(seq 1 20); do
+            if docker exec librarium-smoke node dist/healthcheck.js; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs librarium-smoke
+          exit 1
