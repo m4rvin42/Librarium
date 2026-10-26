@@ -24,6 +24,7 @@ import {
   ReadingSessionQuery,
   RecommendationInput,
   RecommendationSettingsInput,
+  detectedIsbnCandidates,
   extractIsbns,
   parseIsbn,
 } from '@librarium/shared';
@@ -110,6 +111,63 @@ function assistantSafeBook(book: any) {
   delete safe.localCover;
   delete safe.coverUrl;
   return { ...safe, coverAvailable: Boolean(book.localCover || book.coverUrl) };
+}
+
+async function resolveImageIsbn(values: (string | null | undefined)[]) {
+  const rawValues = values.map((value) => value?.trim()).filter(Boolean) as string[];
+  if (!rawValues.length)
+    return { isbn13: null, isbn10: null, metadata: null, evidence: [] as string[] };
+
+  const candidates = rawValues.flatMap((value) => detectedIsbnCandidates(value));
+  const exact = new Map(
+    candidates
+      .filter((candidate) => candidate.kind !== 'checksum-corrected')
+      .map((candidate) => [candidate.isbn13, candidate]),
+  );
+  if (exact.size > 1) throw new Error('Image contains conflicting printed ISBNs.');
+  if (exact.size === 1) {
+    const candidate = [...exact.values()][0]!;
+    return {
+      isbn13: candidate.isbn13,
+      isbn10: candidate.isbn10,
+      metadata: null,
+      evidence:
+        candidate.kind === 'ocr-cleaned'
+          ? [`Cleaned printed ISBN to ${candidate.isbn13}; checksum is valid.`]
+          : [],
+    };
+  }
+
+  const confirmed = new Map<
+    string,
+    { candidate: (typeof candidates)[number]; metadata: Awaited<ReturnType<typeof lookupIsbn>> }
+  >();
+  for (const candidate of candidates.filter((value) => value.kind === 'checksum-corrected')) {
+    const duplicate = findBookByIsbn(candidate.isbn13);
+    const metadata = duplicate ? null : await lookupIsbn(candidate.isbn13).catch(() => null);
+    if (duplicate || metadata) confirmed.set(candidate.isbn13, { candidate, metadata });
+  }
+  if (confirmed.size > 1)
+    throw new Error('Image ISBN has more than one confirmed checksum correction.');
+  if (confirmed.size === 1) {
+    const { candidate, metadata } = [...confirmed.values()][0]!;
+    return {
+      isbn13: candidate.isbn13,
+      isbn10: candidate.isbn10,
+      metadata,
+      evidence: [
+        `Corrected printed ISBN check digit from ${candidate.source} to ${candidate.isbn13}; confirmed by exact catalog or metadata match.`,
+      ],
+    };
+  }
+  return {
+    isbn13: null,
+    isbn10: null,
+    metadata: null,
+    evidence: [
+      'Printed ISBN failed validation and no safe correction could be confirmed; omitted.',
+    ],
+  };
 }
 
 export async function buildApp() {
@@ -982,19 +1040,19 @@ export async function buildApp() {
       const isbn = await detectBarcode(photo.buffer);
       if (isbn) isbns.add(isbn);
     }
-    if (detected.isbn) {
-      try {
-        isbns.add(parseIsbn(detected.isbn).isbn13);
-      } catch {
-        detected.visibleText.push('Printed ISBN failed checksum validation; omitted.');
-      }
-    }
+    const printedIsbn = await resolveImageIsbn([detected.isbn]);
+    if (printedIsbn.isbn13) isbns.add(printedIsbn.isbn13);
+    detected.visibleText.push(...printedIsbn.evidence);
     if (isbns.size > 1)
       throw new Error('Photos contain conflicting ISBNs. Use photos of the same edition.');
     if (!detected.title?.trim())
       throw new Error('No unambiguous book title was detected. Check the photos and try again.');
     const isbn = [...isbns][0];
-    const metadata: any = isbn ? await lookupIsbn(isbn).catch(() => null) : null;
+    const metadata: any = isbn
+      ? printedIsbn.isbn13 === isbn && printedIsbn.metadata
+        ? printedIsbn.metadata
+        : await lookupIsbn(isbn).catch(() => null)
+      : null;
     const proposal: any = { ...metadata };
     for (const key of [
       'title',
@@ -1110,7 +1168,15 @@ export async function buildApp() {
         ];
       } else candidates = (await analyzeImage(normalized.buffer)).books;
       for (const candidate of candidates) {
-        let metadata = candidate.metadata ?? null,
+        const detectedIsbn = candidate.metadata
+          ? null
+          : await resolveImageIsbn([candidate.isbn13, candidate.isbn10]);
+        if (detectedIsbn) {
+          candidate.isbn13 = detectedIsbn.isbn13;
+          candidate.isbn10 = detectedIsbn.isbn10;
+          candidate.visibleText.push(...detectedIsbn.evidence);
+        }
+        let metadata = candidate.metadata ?? detectedIsbn?.metadata ?? null,
           alternatives: any[] = [];
         if (!metadata && candidate.isbn13) metadata = await lookupIsbn(candidate.isbn13);
         if (!metadata && candidate.title)

@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as images from './images.js';
+import * as metadata from './metadata.js';
 import sharp from 'sharp';
 import { buildApp } from './app.js';
 import { db, id, now } from './db.js';
@@ -98,6 +99,69 @@ describe('API', () => {
       }
     } finally {
       analyze.mockRestore();
+    }
+  });
+  it('cleans and confirms a checksum-corrected ISBN from shelf image analysis', async () => {
+    const barcode = vi.spyOn(images, 'detectBarcode').mockResolvedValue(null);
+    const analyze = vi.spyOn(images, 'analyzeImage').mockResolvedValue({
+      books: [
+        {
+          title: 'OCR Book',
+          author: 'OCR Author',
+          isbn10: null,
+          isbn13: 'ISBN: 978-O-306-40615-8',
+          confidence: 0.8,
+          visibleText: ['ISBN: 978-O-306-40615-8'],
+        },
+      ],
+    });
+    const lookup = vi.spyOn(metadata, 'lookupIsbn').mockResolvedValue({
+      title: 'OCR Book',
+      subtitle: null,
+      authors: ['OCR Author'],
+      publisher: null,
+      publicationDate: null,
+      language: null,
+      pageCount: null,
+      description: null,
+      categories: [],
+      coverUrl: null,
+      isbn10: '0306406152',
+      isbn13: '9780306406157',
+      editionFormat: null,
+      metadataSource: 'test',
+      metadataSourceId: 'ocr-book',
+    });
+    const photo = await sharp({
+      create: { width: 20, height: 30, channels: 3, background: 'white' },
+    })
+      .jpeg()
+      .toBuffer();
+    const boundary = 'shelf-photo-test';
+    const payload = Buffer.concat([
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="images"; filename="shelf.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`,
+      ),
+      photo,
+      Buffer.from(`\r\n--${boundary}--\r\n`),
+    ]);
+    try {
+      const result = await app.inject({
+        method: 'POST',
+        url: '/api/v1/imports/images',
+        headers: { ...bearer, 'content-type': `multipart/form-data; boundary=${boundary}` },
+        payload,
+      });
+      expect(result.statusCode).toBe(202);
+      const candidate = result.json().candidates[0];
+      expect(candidate.isbn13).toBe('9780306406157');
+      expect(candidate.isbn10).toBe('0306406152');
+      expect(candidate.evidence).toContainEqual(expect.stringContaining('Corrected printed ISBN'));
+      expect(lookup).toHaveBeenCalledWith('9780306406157');
+    } finally {
+      barcode.mockRestore();
+      analyze.mockRestore();
+      lookup.mockRestore();
     }
   });
   it('requires authentication', async () => {

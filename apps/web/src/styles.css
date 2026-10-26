@@ -343,6 +343,30 @@ dd {
 .muted {
   color: #666;
 }
+.image-detection-info {
+  margin: 0 0 18px;
+}
+.image-detection-info aside {
+  margin-top: 12px;
+  padding: 16px 18px;
+  border-left: 4px solid #b95f3d;
+  border-radius: 7px;
+  background: #f5f2e9;
+}
+.image-detection-info h3 {
+  margin: 0 0 8px;
+}
+.image-detection-info ul {
+  margin: 0;
+  padding-left: 20px;
+}
+.image-detection-info li + li {
+  margin-top: 8px;
+}
+.image-detection-info p {
+  margin: 12px 0 0;
+  font-weight: 650;
+}
 .cover-review {
   margin-top: 20px;
 }

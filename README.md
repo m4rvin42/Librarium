@@ -44,7 +44,11 @@ The upload limit remains ten photos, with `MAX_IMAGE_SIZE_MB` applying to each p
 The new `/api/v1/imports/book-photos` endpoint accepts multipart files named `front`, `back`, or
 `detail`. It sends the photos together to the configured OpenAI vision model, transcribes visible
 back-cover text, extracts bibliographic fields, validates printed/barcode ISBNs, and fills missing
-fields from ISBN metadata where available. Conflicting ISBNs are rejected. The front cover is
+fields from ISBN metadata where available. Printed values are cleaned of labels, separators,
+surrounding noise, and common OCR substitutions. Checksums are required, and ISBN-13 values must
+use the `978` or `979` book prefix. A final
+check-digit correction is accepted only when an exact metadata result or existing catalog record
+confirms it; the review evidence shows the correction. Conflicting ISBNs are rejected. The front cover is
 cropped/straightened when usable corners are detected; otherwise the original front photo is kept.
 Review the cover preview, ISBN, description and evidence before approval. Nothing is added to the
 catalog until approval, which also saves the selected local cover. No database migration is required.
