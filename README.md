@@ -44,7 +44,11 @@ The upload limit remains ten photos, with `MAX_IMAGE_SIZE_MB` applying to each p
 The new `/api/v1/imports/book-photos` endpoint accepts multipart files named `front`, `back`, or
 `detail`. It sends the photos together to the configured OpenAI vision model, transcribes visible
 back-cover text, extracts bibliographic fields, validates printed/barcode ISBNs, and fills missing
-fields from ISBN metadata where available. Conflicting ISBNs are rejected. The front cover is
+fields from ISBN metadata where available. Printed values are cleaned of labels, separators,
+surrounding noise, and common OCR substitutions. Checksums are required, and ISBN-13 values must
+use the `978` or `979` book prefix. A final
+check-digit correction is accepted only when an exact metadata result or existing catalog record
+confirms it; the review evidence shows the correction. Conflicting ISBNs are rejected. The front cover is
 cropped/straightened when usable corners are detected; otherwise the original front photo is kept.
 Review the cover preview, ISBN, description and evidence before approval. Nothing is added to the
 catalog until approval, which also saves the selected local cover. No database migration is required.
@@ -67,9 +71,23 @@ docker pull ghcr.io/m4rvin42/librarium:latest
 
 ## Development
 
-Node.js 22 is required. Run npm ci, copy .env.example to .env, point DATABASE_PATH and DATA_DIRECTORY at local writable paths, then run npm run db:migrate, npm run db:seed, and npm run dev. Vite runs at http://localhost:5173 and proxies Fastify on port 3000.
+Docker is the canonical build and verification environment. The default image build uses Node.js 22
+and runs linting, type checks, tests, and the production build before creating the runtime image:
 
-Verify with npm run lint, npm run typecheck, npm test, and npm run build.
+```sh
+docker build -t librarium:local .
+```
+
+To run only the verification stage, use:
+
+```sh
+docker build --target verify -t librarium:verify .
+```
+
+For host-based development, Node.js 22 is required. Run npm ci, copy .env.example to .env, point DATABASE_PATH and DATA_DIRECTORY at local writable paths, then run npm run db:migrate, npm run db:seed, and npm run dev. Vite runs at http://localhost:5173 and proxies Fastify on port 3000.
+
+The equivalent host-side checks are `npm run lint`, `npm run typecheck`, `npm test`, and
+`npm run build`.
 
 ## Configuration
 

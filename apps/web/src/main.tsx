@@ -690,6 +690,53 @@ function BookDetails() {
   );
 }
 
+export function ImageDetectionInfo() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="image-detection-info">
+      <button
+        type="button"
+        className="secondary"
+        aria-expanded={open}
+        aria-controls="image-detection-explanation"
+        onClick={() => setOpen(!open)}
+      >
+        ⓘ How image detection works
+      </button>
+      {open && (
+        <aside id="image-detection-explanation" role="note">
+          <h3>Before you upload</h3>
+          <ul>
+            <li>
+              <strong>One book:</strong> all selected photos are normalized and sent to the
+              configured AI vision service. Barcodes are also scanned locally.
+            </li>
+            <li>
+              <strong>Multiple books / shelf:</strong> each photo is scanned locally for a barcode
+              first. AI vision is used only when no readable ISBN barcode is found.
+            </li>
+            <li>
+              Printed ISBN text is cleaned of labels, separators, surrounding noise, and common OCR
+              confusions. Checksums are validated, and ISBN-13 values must use the 978 or 979 book
+              prefix.
+            </li>
+            <li>
+              A wrong final check digit is suggested only when the corrected ISBN is confirmed by an
+              exact metadata result or an existing catalog book. Other uncertain corrections are
+              omitted rather than guessed.
+            </li>
+            <li>
+              Your catalog is checked for exact duplicates, not used to silently choose a similar
+              ISBN. Conflicts are stopped for review.
+            </li>
+          </ul>
+          <p>Nothing is added to your library until you select and approve a review candidate.</p>
+        </aside>
+      )}
+    </div>
+  );
+}
+
 function AddBooks() {
   const [photos, setPhotos] = useState<BookPhoto[]>([]);
   const [photoMode, setPhotoMode] = useState('single');
@@ -890,6 +937,7 @@ function AddBooks() {
               Detected information stays in review until you approve it. Single-book analysis sends
               all selected photos to the configured AI service.
             </p>
+            <ImageDetectionInfo />
             <PhotoPicker photos={photos} onChange={setPhotos} disabled={busy} />
           </>
         )}
