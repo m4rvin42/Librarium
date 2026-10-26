@@ -29,4 +29,16 @@ describe('photo capture queue', () => {
     expect(screen.getByText('1 / 10 photos')).toBeInTheDocument();
     expect(screen.getByLabelText('Photo 1 role')).toHaveValue('back');
   });
+  it('offers direct front and ISBN/back camera actions', () => {
+    URL.createObjectURL = vi.fn(() => 'blob:preview');
+    URL.revokeObjectURL = vi.fn();
+    render(<Harness />);
+    const camera = screen.getByLabelText('Camera capture');
+    fireEvent.click(screen.getByRole('button', { name: 'Scan ISBN / back cover' }));
+    fireEvent.change(camera, {
+      target: { files: [new File(['isbn'], 'isbn.jpg', { type: 'image/jpeg' })] },
+    });
+    expect(screen.getByLabelText('Photo 1 role')).toHaveValue('back');
+    expect(screen.getByText(/clear barcode or printed ISBN is enough/i)).toBeInTheDocument();
+  });
 });

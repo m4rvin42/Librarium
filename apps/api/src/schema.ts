@@ -67,6 +67,16 @@ export const readingSessions = sqliteTable('reading_sessions', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
+export const bookImages = sqliteTable('book_images', {
+  id: text().primaryKey(),
+  bookId: text('book_id')
+    .notNull()
+    .references(() => books.id, { onDelete: 'cascade' }),
+  kind: text().notNull(),
+  path: text().notNull(),
+  mimeType: text('mime_type').notNull(),
+  createdAt: text('created_at').notNull(),
+});
 export const importBatches = sqliteTable('import_batches', {
   id: text().primaryKey(),
   kind: text().notNull(),

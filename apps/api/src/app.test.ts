@@ -78,8 +78,13 @@ describe('API', () => {
       const book = approve.json().created[0];
       expect(book.description).toBe('Original back-cover text.');
       expect(book.localCover).toBeTruthy();
+      expect(book.backCoverAvailable).toBe(true);
       expect(
         (await app.inject({ url: `/api/v1/books/${book.id}/cover`, headers: bearer })).statusCode,
+      ).toBe(200);
+      expect(
+        (await app.inject({ url: `/api/v1/books/${book.id}/back-cover`, headers: bearer }))
+          .statusCode,
       ).toBe(200);
       const barcode = vi
         .spyOn(images, 'detectBarcode')
@@ -99,6 +104,63 @@ describe('API', () => {
       }
     } finally {
       analyze.mockRestore();
+    }
+  });
+  it('imports a single book from a barcode photo without a visible title', async () => {
+    const analyze = vi
+      .spyOn(images, 'analyzeBookPhotos')
+      .mockRejectedValue(new Error('Vision unavailable'));
+    const barcode = vi.spyOn(images, 'detectBarcode').mockResolvedValue('9780306406157');
+    const lookup = vi.spyOn(metadata, 'lookupIsbn').mockResolvedValue({
+      title: 'Barcode Book',
+      subtitle: null,
+      authors: ['Barcode Author'],
+      publisher: 'Test Publisher',
+      publicationDate: null,
+      language: null,
+      pageCount: null,
+      description: null,
+      categories: [],
+      coverUrl: null,
+      isbn10: '0306406152',
+      isbn13: '9780306406157',
+      editionFormat: null,
+      metadataSource: 'test',
+      metadataSourceId: 'barcode-book',
+    });
+    const photo = await sharp({
+      create: { width: 20, height: 30, channels: 3, background: 'white' },
+    })
+      .jpeg()
+      .toBuffer();
+    const boundary = 'single-barcode-test';
+    const payload = Buffer.concat([
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="back"; filename="barcode.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`,
+      ),
+      photo,
+      Buffer.from(`\r\n--${boundary}--\r\n`),
+    ]);
+    try {
+      const result = await app.inject({
+        method: 'POST',
+        url: '/api/v1/imports/book-photos',
+        headers: { ...bearer, 'content-type': `multipart/form-data; boundary=${boundary}` },
+        payload,
+      });
+      expect(result.statusCode).toBe(202);
+      expect(result.json().candidates[0]).toMatchObject({
+        title: 'Barcode Book',
+        isbn13: '9780306406157',
+      });
+      expect(result.json().candidates[0].evidence).toContainEqual(
+        expect.stringContaining('read from barcode'),
+      );
+      expect(lookup).toHaveBeenCalledWith('9780306406157');
+    } finally {
+      analyze.mockRestore();
+      barcode.mockRestore();
+      lookup.mockRestore();
     }
   });
   it('cleans and confirms a checksum-corrected ISBN from shelf image analysis', async () => {

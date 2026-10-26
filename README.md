@@ -42,7 +42,8 @@ as **Back cover**, and any others as **Other detail**. Remove or replace bad sho
 The upload limit remains ten photos, with `MAX_IMAGE_SIZE_MB` applying to each photo.
 
 The new `/api/v1/imports/book-photos` endpoint accepts multipart files named `front`, `back`, or
-`detail`. It sends the photos together to the configured OpenAI vision model, transcribes visible
+`detail`. It scans barcodes locally first, then sends the photos together to the configured OpenAI
+vision model when available, transcribes visible
 back-cover text, extracts bibliographic fields, validates printed/barcode ISBNs, and fills missing
 fields from ISBN metadata where available. Printed values are cleaned of labels, separators,
 surrounding noise, and common OCR substitutions. Checksums are required, and ISBN-13 values must
@@ -53,9 +54,10 @@ cropped/straightened when usable corners are detected; otherwise the original fr
 Review the cover preview, ISBN, description and evidence before approval. Nothing is added to the
 catalog until approval, which also saves the selected local cover. No database migration is required.
 
-This combined mode requires enabled OpenAI image analysis and sends **all** selected photos to
-OpenAI, even when a barcode is readable. **Multiple books / shelf** preserves the separate-image,
-barcode-first import. Actual camera launch depends on the phone/browser; test successive captures
+When a checksum-valid barcode is readable, the combined mode can complete the import from ISBN
+metadata even if OpenAI image analysis is unavailable. Otherwise this mode requires enabled OpenAI
+image analysis. When it is enabled, it sends **all** selected photos to OpenAI, even when a barcode
+is readable. **Multiple books / shelf** preserves the separate-image, barcode-first import. Actual camera launch depends on the phone/browser; test successive captures
 on iOS Safari and Android Chrome after deployment. The app now supplies its own button labels
 instead of the browser's ambiguous native file-selection label.
 

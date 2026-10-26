@@ -57,15 +57,18 @@ export function PhotoPicker({
   photos,
   onChange,
   disabled = false,
+  singleBook = true,
 }: {
   photos: BookPhoto[];
   onChange: (photos: BookPhoto[]) => void;
   disabled?: boolean;
+  singleBook?: boolean;
 }) {
   const camera = useRef<HTMLInputElement>(null);
   const gallery = useRef<HTMLInputElement>(null);
+  const requestedRole = useRef<BookPhoto['role'] | null>(null);
   const [error, setError] = useState('');
-  function add(input: HTMLInputElement) {
+  function add(input: HTMLInputElement, role: BookPhoto['role'] | null = null) {
     const files = Array.from(input.files || []);
     input.value = '';
     if (photos.length + files.length > 10) {
@@ -77,21 +80,23 @@ export function PhotoPicker({
       ...photos,
       ...files.map((file, index) => ({
         file,
-        role: (photos.length + index === 0
-          ? 'front'
-          : photos.length + index === 1
-            ? 'back'
-            : 'detail') as BookPhoto['role'],
+        role:
+          role ??
+          ((photos.length + index === 0
+            ? 'front'
+            : photos.length + index === 1
+              ? 'back'
+              : 'detail') as BookPhoto['role']),
       })),
     ]);
   }
+  function openCamera(role: BookPhoto['role'] | null) {
+    requestedRole.current = role;
+    camera.current?.click();
+  }
   return (
-    <fieldset disabled={disabled}>
+    <fieldset className="photo-picker" disabled={disabled}>
       <legend>Book photos</legend>
-      <p>
-        Take the front cover, then the back cover. Each photo is kept until you remove it. You can
-        change its role below.
-      </p>
       <input
         ref={camera}
         aria-label="Camera capture"
@@ -99,7 +104,10 @@ export function PhotoPicker({
         type="file"
         accept="image/*"
         capture="environment"
-        onChange={(e) => add(e.currentTarget)}
+        onChange={(e) => {
+          add(e.currentTarget, requestedRole.current);
+          requestedRole.current = null;
+        }}
       />
       <input
         ref={gallery}
@@ -110,12 +118,30 @@ export function PhotoPicker({
         multiple
         onChange={(e) => add(e.currentTarget)}
       />
-      <button type="button" onClick={() => camera.current?.click()}>
-        Take photo
-      </button>{' '}
-      <button type="button" onClick={() => gallery.current?.click()}>
-        Choose existing photos
-      </button>
+      <div className="photo-actions">
+        {singleBook ? (
+          <>
+            <button type="button" onClick={() => openCamera('front')}>
+              Take front cover
+            </button>
+            <button type="button" onClick={() => openCamera('back')}>
+              Scan ISBN / back cover
+            </button>
+          </>
+        ) : (
+          <button type="button" onClick={() => openCamera(null)}>
+            Scan a book
+          </button>
+        )}
+        <button className="secondary" type="button" onClick={() => gallery.current?.click()}>
+          Choose existing photos
+        </button>
+      </div>
+      <p>
+        {singleBook
+          ? 'A clear barcode or printed ISBN is enough when metadata is available. Add a front cover for a better catalog image.'
+          : 'Take one photo per book or shelf section. Barcode detection runs before AI analysis.'}
+      </p>
       <p>{photos.length} / 10 photos</p>
       {error && <p role="alert">{error}</p>}
       {photos.map((photo, index) => (
