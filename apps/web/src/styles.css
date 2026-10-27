@@ -131,6 +131,12 @@ h2 {
   align-items: center;
   gap: 20px;
 }
+.compact-heading h2 {
+  margin: 0;
+}
+.compact-heading button {
+  padding: 0.5rem 0.75rem;
+}
 .button,
 button {
   display: inline-block;

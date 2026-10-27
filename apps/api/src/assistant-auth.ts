@@ -115,8 +115,8 @@ export function audit(
 }
 
 export function listAuditEvents(page = 1, limit = 50) {
-  const safePage = Math.max(1, page);
-  const safeLimit = Math.min(100, Math.max(1, limit));
+  const safePage = Number.isFinite(page) ? Math.max(1, Math.floor(page)) : 1;
+  const safeLimit = Number.isFinite(limit) ? Math.min(100, Math.max(1, Math.floor(limit))) : 50;
   const total = (db.prepare('SELECT count(*) count FROM audit_events').get() as any).count;
   const items = db
     .prepare(

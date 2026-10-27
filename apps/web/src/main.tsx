@@ -1134,7 +1134,8 @@ function Settings() {
   });
   const audit = useQuery({
     queryKey: ['audit-events'],
-    queryFn: () => api<any>('/settings/audit-events?limit=20'),
+    queryFn: () => api<any>('/settings/audit-events?page=1&limit=20'),
+    refetchInterval: 10_000,
   });
   const trash = useQuery({ queryKey: ['trash'], queryFn: () => api<any>('/trash/books') });
   const [message, setMessage] = useState('');
@@ -1150,12 +1151,16 @@ function Settings() {
     onSuccess: (result) => {
       setNewToken(result.token);
       void credentials.refetch();
+      void audit.refetch();
     },
   });
   const revokeApiCredential = useMutation({
     mutationFn: (credentialId: string) =>
       api(`/settings/api-credentials/${credentialId}`, { method: 'DELETE' }),
-    onSuccess: () => void credentials.refetch(),
+    onSuccess: () => {
+      void credentials.refetch();
+      void audit.refetch();
+    },
   });
   const recommendationSettings = useMutation({
     mutationFn: (enabled: boolean) =>
@@ -1395,12 +1400,24 @@ function Settings() {
           ))}
         </section>
         <section className="panel">
-          <h2>Recent API activity</h2>
-          {!audit.data?.items.length && <p className="muted">No assistant activity yet.</p>}
+          <div className="heading compact-heading">
+            <h2>Recent API activity</h2>
+            <button className="secondary" type="button" onClick={() => audit.refetch()}>
+              Refresh
+            </button>
+          </div>
+          {audit.isLoading && <p className="muted">Loading assistant activity…</p>}
+          {audit.isError && (
+            <p className="error">Assistant activity could not be loaded. Try refreshing.</p>
+          )}
+          {audit.isSuccess && !audit.data.items.length && (
+            <p className="muted">No assistant activity yet.</p>
+          )}
           {audit.data?.items.map((event: any) => (
             <p key={event.id}>
               <strong>{event.credentialName || event.actorType}</strong> · {event.operation} ·{' '}
-              {event.statusCode}
+              {event.statusCode} ·{' '}
+              <time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString()}</time>
             </p>
           ))}
         </section>

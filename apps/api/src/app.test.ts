@@ -538,5 +538,25 @@ describe('API', () => {
     const names = body.result.tools.map((tool: any) => tool.name);
     expect(names).toContain('search_books');
     expect(names).not.toContain('create_book');
+    const audit = await app.inject({
+      url: '/api/v1/settings/audit-events?limit=20',
+      headers: bearer,
+    });
+    expect(audit.statusCode).toBe(200);
+    expect(audit.json().items).toContainEqual(
+      expect.objectContaining({
+        credentialName: 'Reader',
+        operation: 'MCP tools/list',
+        statusCode: 200,
+      }),
+    );
+    expect(
+      (
+        await app.inject({
+          url: '/api/v1/settings/audit-events?page=invalid&limit=invalid',
+          headers: bearer,
+        })
+      ).statusCode,
+    ).toBe(200);
   });
 });
