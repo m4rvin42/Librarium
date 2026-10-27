@@ -425,6 +425,17 @@ export async function buildApp() {
     const identity = (req as any).assistant as AssistantIdentity | undefined;
     if (!identity || !req.url.startsWith('/api/v1/')) return;
     const route = req.routeOptions.url ?? req.url;
+    const mcpBody = route === '/api/v1/mcp' ? (req.body as any) : null;
+    const mcpMethod =
+      typeof mcpBody?.method === 'string' ? mcpBody.method.slice(0, 100) : 'request';
+    const mcpTool =
+      mcpMethod === 'tools/call' && typeof mcpBody?.params?.name === 'string'
+        ? mcpBody.params.name.slice(0, 100)
+        : null;
+    const operation =
+      route === '/api/v1/mcp'
+        ? `MCP ${mcpMethod}${mcpTool ? ` (${mcpTool})` : ''}`
+        : `${req.method} ${route}`;
     const targetType = route.includes('/books')
       ? 'book'
       : route.includes('/reading-session')
@@ -434,13 +445,7 @@ export async function buildApp() {
           : route.includes('/confirmations')
             ? 'confirmation'
             : undefined;
-    audit(
-      identity,
-      `${req.method} ${route}`,
-      reply.statusCode,
-      targetType,
-      (req.params as any)?.id,
-    );
+    audit(identity, operation, reply.statusCode, targetType, (req.params as any)?.id);
   });
 
   app.addHook('preHandler', async (req, reply) => {
