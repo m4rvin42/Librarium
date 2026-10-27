@@ -1413,13 +1413,19 @@ function Settings() {
           {audit.isSuccess && !audit.data.items.length && (
             <p className="muted">No assistant activity yet.</p>
           )}
-          {audit.data?.items.map((event: any) => (
-            <p key={event.id}>
-              <strong>{event.credentialName || event.actorType}</strong> · {event.operation} ·{' '}
-              {event.statusCode} ·{' '}
-              <time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString()}</time>
-            </p>
-          ))}
+          {!!audit.data?.items.length && (
+            <div className="api-activity-list" aria-label="Recent API activity entries">
+              {audit.data.items.map((event: any) => (
+                <p key={event.id}>
+                  <strong>{event.credentialName || event.actorType}</strong> · {event.operation} ·{' '}
+                  {event.statusCode} ·{' '}
+                  <time dateTime={event.createdAt}>
+                    {new Date(event.createdAt).toLocaleString()}
+                  </time>
+                </p>
+              ))}
+            </div>
+          )}
         </section>
         <section className="panel">
           <h2>Download backup</h2>

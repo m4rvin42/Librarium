@@ -351,6 +351,20 @@ dd {
 .settings-grid .panel {
   max-width: none;
 }
+.api-activity-list {
+  max-height: 24rem;
+  margin-top: 12px;
+  padding-right: 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.api-activity-list p:first-child {
+  margin-top: 0;
+}
+.api-activity-list p:last-child {
+  margin-bottom: 0;
+}
 .login {
   min-height: 100vh;
   display: grid;
